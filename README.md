@@ -1,104 +1,65 @@
-# Éveil — native menu application and safe sessions
+# Eveil
 
-Éveil 2.0.0 is a signed, native macOS 14+ menu application for Apple Silicon. The sun opens an anchored SwiftUI popover with 1 / 2 / 3 hours or unlimited duration, remaining time, a single session switch and verified power/thermal state. The privileged daemon owns safety, deadlines and restoration.
+Une application macOS pour maintenir votre Mac éveillé depuis la barre des menus, pendant **1, 2 ou 3 heures**, ou sans limite de durée.
 
-## Normal use (no Terminal)
+**Compatibilité :** Mac Apple Silicon · macOS 14 ou ultérieur.
 
-Open Éveil. If it is outside Applications, choose **Installer dans Applications**. The installer asks a running older Éveil to quit normally, confirms restoration, waits for the old signed service's asynchronous unregister completion plus two-second settling interval and verifies that its process has exited. It verifies signatures, preserves the installed version under `~/Library/Application Support/Éveil/Anciennes versions`, then replaces and opens `/Applications/Eveil.app`. A failure stops the transaction; there is no automatic retry.
+## Installation
 
-Choose **Activer le service**. If macOS requires approval, open the offered System Settings page, authorize Éveil in the background, then choose **Vérifier l’autorisation**. Setup finishes only after an authenticated response and a valid session status. Choose **Commencer**, select a duration, then turn on **Maintenir éveillé**.
+1. Téléchargez l’archive de la version souhaitée depuis [Releases](https://github.com/emieuxcharles/Eveil-MacOS/releases).
+2. Décompressez-la, ouvrez **Eveil.app**, puis choisissez **Installer dans Applications** si proposé.
+3. Activez le service et autorisez Eveil dans les réglages macOS si demandé. Revenez dans l’app pour vérifier l’autorisation.
 
-Closing a popover or window keeps Éveil and its session running. **Quitter Éveil** waits for confirmed restoration before terminating. If restoration is uncertain, the app stays open and shows an actionable error. Forced termination is handled independently by the daemon.
+## Utilisation
 
-The gear opens **Réglages** for protection explanations, application/service versions and a local diagnostic export. **Retirer le service…** asks for confirmation, restores first, then unregisters. It does not delete the app or previous versions. After successful removal, quit Éveil and move `/Applications/Eveil.app` to the Trash using Finder. Keep the Mac ventilated; Éveil does not guarantee safety in a closed bag.
+Cliquez sur le soleil dans la barre des menus, choisissez une durée et activez **Maintenir éveillé**.
 
-## Native UI architecture and developer rendering
+À la fin du compte à rebours, à la désactivation ou lorsque vous quittez l’application, Eveil rétablit la veille et les réglages d’économie d’énergie précédents. Fermer le panneau laisse la session active.
 
-`AppDelegate.swift` owns the status item, anchored popover and native setup/settings window. `AppModel.swift` owns one persistent `ServiceClient`, bounded control requests, stale-reply exclusion, confirmed connection/restoration and explicit retry. It never implements daemon safety. Read-only status refresh neither reconnects after a failure nor renews ownership. Remaining time is interpolated using system uptime between verified snapshots. `AppViews.swift` contains the French SwiftUI views, native controls, scrolling for shorter displays, semantic appearance and increased-contrast text. `AppInstaller.swift` implements the same installation transaction used by the native button. `Fixtures.swift` renders isolated, labeled view states without a client, lifecycle operation or power access.
+Pendant une session, le mode économie d’énergie est activé. Si macOS signale un état thermique sérieux ou critique, Eveil arrête la session et demande la mise en veille.
 
-Run the built executable with `--render-snapshots /absolute/output/folder` to render ten states in light and dark plus solid, high-contrast variants. The accessibility variants use high-contrast AppKit appearance and the same SwiftUI foreground/background policy used for system accessibility settings. They are fixtures, not evidence of a real session. Views use no ornamental motion; native popover animation follows Reduce Motion. `--install-app` exercises the exact native installer transaction for developer integration; ordinary users use its button.
+**Gardez le Mac ventilé : ces protections ne rendent pas son utilisation dans un sac fermé sûre.**
 
-For read-only GUI diagnostics, run the installed executable with `--ui-state` while its GUI is open. A UUID-correlated distributed notification asks only for page/setup, process ID, AppKit window visibility and geometry; it never opens/closes a view or touches service/power state. The GUI writes a fixed mode-0600 file at `~/Library/Application Support/Éveil/Diagnostics/ui-state.json`; the reader waits at most three seconds. This separates a missing/transient popover from an accessibility-tool timeout.
+Pour désinstaller : dans les réglages d’Eveil, choisissez **Retirer le service…**, attendez la confirmation, quittez l’app puis placez-la dans la Corbeille. En cas de problème, utilisez **Exporter le diagnostic…** dans les réglages.
 
-Runtime recovery rechecks the current administrative registration state after a connection loss/failure and before an explicit connection retry. Revoked permission routes to macOS approval, and a removed service routes to activation; the last unknown snapshot is retained without being presented as current. A refused/recovering Quit opens the session recovery view and its explicit restoration action, never successful setup. A service already recovering at initial connection also cannot enable setup completion.
+## Développement
 
-The client rejects late heartbeat side effects after an ownership revision (start, stop, disconnect), preventing an obsolete active reply from reappearing after restoration or an obsolete idle reply from ending a newer ownership. The test-only fake transport is compiled under DEBUG only and is absent from release builds.
+Avec Xcode et ses outils de ligne de commande :
 
-## Build and validation
+```sh
+swift test
+swift build -c release
+```
 
-Run `./scripts/build.sh` to create `dist/Eveil.app`, using the configured Developer ID certificate, hardened runtime and secure timestamp. Run `swift test` for the complete deterministic suite. Developer real-settings checks are `./scripts/verify-service.sh`, `./scripts/verify-rejection.sh`, and `python3 scripts/verify-sessions.py /private/tmp/eveil2-sessions.json`.
+Pour créer `dist/Eveil.app`, signée avec votre certificat Developer ID :
 
-For a developer update, obtain the old helper PID from `--probe`, then run the installed app's `--unregister`. **This CLI waits for the SMAppService asynchronous unregister completion callback (maximum 30 seconds), then asynchronously waits two seconds before returning. Only successful completion plus that settling interval permits replacement and registration.** The synchronous unregister API does not wait for process reaping. This is the explicit contract in the local SDK `ServiceManagement.framework/Headers/SMAppService.h` (unregisterWithCompletionHandler). Check that the old PID has disappeared as an additional diagnostic, then copy the signed replacement to `/Applications/Eveil.app` and call `--register`. A timeout/error aborts the update; do not overwrite an executable still registered or running. Preserve the replaced bundle in a disabled backup before installation.
+```sh
+EVEIL2_SIGN_IDENTITY="EMPREINTE_DU_CERTIFICAT" ./scripts/build.sh
+```
 
-**Apple timing workaround validated on this Mac:** [Apple DTS describes this unregister/register bug](https://developer.apple.com/forums/thread/783539) and recommends another main-run-loop turn, then an empirical delay if needed. The thread's two-second delay is used asynchronously here; it is a workaround, not an OS guarantee. Two isolated restart cycles and an active-session restart passed with the new coordinator. A permission error with status notRegistered offers an explicit retry; requiresApproval always directs the user to macOS approval. There is no automatic retry loop.
+L’application et son service exigent une signature de l’équipe Apple configurée dans `Sources/EveilIPC/Protocol.swift`.
 
-The normal GUI offers **Activer le service**, **Ouvrir les réglages macOS**, and **Vérifier l’autorisation**. Approval belongs to System Settings → General → Login Items & Extensions; no Terminal is needed in the normal user flow. Only an authenticated real response proves readiness.
+## Releases automatiques
 
-## Identity and layout (unchanged)
+- **Push sur `main` ou pull request vers `main` :** tests et compilation.
+- **Tag `vMAJOR.MINOR.PATCH` :** tests, signature, validation Apple et publication de l’archive avec son empreinte SHA-256. Un contrôle en échec bloque la publication.
 
-App ID `fr.eveil2.app`; daemon/Mach service `fr.eveil2.daemon`; plist `fr.eveil2.daemon.plist`. The daemon is `Contents/MacOS/Eveil2Daemon` in `/Applications/Eveil.app`, with a relative `BundleProgram`. Both sides require the Apple Developer ID chain, exact team `4Y79TY2592`, and exact peer identifier. Ad-hoc clients cannot satisfy this requirement. The daemon requires root and rejects root XPC clients. KeepAlive and RunAtLoad relaunch the daemon independently of a UI client after a crash.
-
-## Typed IPC and Task 3 client contract
-
-`EveilServiceProtocol` exports only `ping(nonce, reply)`, `status(reply)`, `start(duration, reply)`, `heartbeat(reply)`, and `stop(reply)`. No command, executable, path, test clock, thermal injection or short duration is accepted over XPC. Supported duration values are exactly `0`, `3600`, `7200`, `10800` seconds; zero means unlimited.
-
-Ping retains the version-1 nonce/root `ServiceProof`. Session methods return JSON-encoded `ServiceReply`: `accepted`, a version-2 `ServiceSnapshot`, and optional request `error`. A snapshot contains phase (`idle`, `active`, `recovering`), sessionID/start/deadline/duration/remainingSeconds, ownerConnected, thermal, stopCause, verified settings and optional restoration error. Optional session fields disappear after successful restoration. Dates use Foundation Codable's reference-date seconds; lowPower is a keyed object (`battery`, `ac`, `ups`). `settings` is the last successfully read power state, not an unverified requested value.
-
-`EveilApp.ServiceClient` is used on the main queue. Keep one client alive for the controlling UI session. `probe` verifies a real authenticated response; `status` reads without renewing ownership. `startSession(duration:heartbeats:completion:)` begins automatic 5-second heartbeats only after an accepted active reply (default heartbeats=true). `stopSession(completion:)` stops the timer and asks for restoration; `disconnect()` closes ownership and fails pending operations. `ownsSession`, `onSessionUpdate`, and `onDisconnect` support the UI state machine. Callbacks are on the main queue. Calls time out after 10 seconds and close the connection so an unknown start result cannot leave unattended ownership. A reconnect never automatically acquires or resumes the old session. On GUI quit, request stop and wait for its result; connection invalidation and daemon heartbeats are independent fallbacks.
-
-## Session policy and recovery
-
-A single serial daemon queue owns all session state. Only the connection which started the session can heartbeat; another client cannot replace it. Status/ping never refresh the heartbeat. Stop is accepted from any authenticated client. Disconnect stops immediately; 20 seconds without an owner heartbeat stops at the next 2-second tick. Duration checks use both persisted wall-clock deadlines and a continuous monotonic deadline, so clock changes cannot extend a session. Sleep/wake notifications stop without resuming.
-
-The daemon reads current per-source low-power settings before every start. It writes and fsyncs the root-only `/var/db/fr.eveil2/session.json` journal before any power mutation, enables and verifies low-power per available source, then disables and verifies sleep. All ends first force `disablesleep=0`, including when its original value was 1, and restore and verify the captured low-power value separately for each source. No historical defaults are assumed.
-
-Journal directory/file modes are 0700/0600 and root-owned, with symlink rejection, bounded reads, atomic replacement and file/directory fsync. Corrupt/unreadable journals block new sessions and permit sleep without discarding unknown originals. Partial recovery retains its journal and visible error and retries every two seconds. Successful recovery clears that error. Startup recovers the journal before accepting a new start. Deletion plus directory-sync failure is safe to retry idempotently.
-
-Serious/critical thermal state rejects start; active thermal stops restore power and request sleep through the fixed driver. A durable intent precedes the request; successful sleep is never repeated across recovery retries or wake. An interrupted intent is deliberately treated as already attempted after daemon restart: at-most-once sleep avoids a wake/sleep loop if the daemon crashed after macOS accepted the request. Thermal and sleep tests inject fake drivers only. Live tests never call sleepnow, physically close the lid, or heat the Mac.
-
-Every pmset process has a three-second execution limit, bounded output and a kill/reap deadline. The only production executable is `/usr/bin/pmset`, with fixed operations/validated values. There is no shell endpoint.
-
-## Developer CLI
-
-`--status`, `--register`, `--unregister` and `--probe` retain their foundation meanings. `--restart-service` coordinates one asynchronous unregister → two-second settling interval → one registration. Registration has a ten-second result deadline; unregister has a thirty-second callback deadline followed by the full two-second settling interval. A deadline reports an uncertain result once and leaves the uncancellable native-operation lock held until the actual callback (plus unregister settling). Another register/unregister/retry cannot overlap it. Late completion updates state through `onStateChange` without repeating the original completion or automatically continuing a timed-out restart. `isOperationInFlight` remains true while a native call or its settling interval is outstanding. The GUI reconciles a late native result and verifies enabled state with an authenticated probe. CLI success is specific to the command: register/restart requires enabled, unregister requires notRegistered. Failures print NSError domain/code/description/userInfo and lifecycle/status, rather than hiding the native error. The native setup distinguishes administrative approval, explicit activation and authenticated connection; errors expose technical details without a modal retry loop. `ServiceLifecycleCoordinator` in EveilCore is injected/testable; `makeServiceLifecycle` in EveilApp adapts SMAppService and dispatches callbacks to the main queue. `--session-status` is read-only; `--session-stop` restores. `--session-start 3600` holds authenticated ownership with heartbeats until SIGTERM/SIGINT, then restores. Optional `--hold-seconds N` bounds that controller to 1–30 seconds. `--bounded-test 5` starts the production 3600-second duration and stops after five seconds, prints actual before/active/after readings, checks restoration, and cleans up on failures. `--without-heartbeats` only makes a controller expire sooner and is used to prove diagnostic clients do not renew it. No developer CLI grants a production duration bypass.
-
-Notarization and final distribution verification belong to the release handoff. Launch-at-login is not included; the menu application starts only when opened. A raw root-helper SIGKILL still requires administrator authorization for the external test harness; the shipped XPC API intentionally has no privileged kill/test endpoint.
-
-
-## Final recovery and installer-boundary corrections (build 202)
-
-An explicit stop without a session journal now allows sleep and reads the current OS settings again. It does not change low-power values because no saved originals exist. Command failure, failed verification or read failure clears the cached settings and returns an error; startup without a journal remains read-only. Connected idle-but-unrestored state exposes **Vérifier la restauration** and can quit after successful verification. The menu tooltip only claims sleep is allowed after confirmed restoration.
-
-Lifecycle CLI deadlines are informational while a native operation is outstanding. The CLI keeps its run loop and a user-level `flock` alive through the real callback and unregister settling. It writes `EVEIL_NATIVE_PENDING` / `EVEIL_NATIVE_SETTLED` on stderr; normal stdout remains `enabled` or `notRegistered`. A late result exits 3 instead of reporting successful continuation. The native GUI adapter observes the same lifecycle lock and releases it only from the coordinator's finished hook.
-
-The installer retains and drains its unregister child after the CLI deadline or its own 45-second deadline. A second installation/unregister is refused while unresolved; a late completion releases exclusion only, without resuming replacement. A separate installer lock prevents a second installer from terminating the pending owner or starting another transaction. An ambiguous error from an older CLI lacking terminal markers stays conservatively blocked; it is not treated as proof that macOS finished. No owner is killed to repair a timeout. The developer integration harness likewise leaves a timed-out lifecycle owner alive instead of using `subprocess.run`'s timeout kill.
-
-`Tests/LifecycleFixture` is an isolated executable for cross-process tests, never copied into the app. Tests run real children with a simulated native callback beyond the coordinator deadline, verify refusal before and during settling, verify that no timed-out transaction resumes replacement, and require a new explicit attempt afterward. Another case covers the installer's own deadline, and another covers an ambiguous legacy error. No real ServiceManagement or power call occurs in these fixtures.
-
-## Automated tests and releases
-
-GitHub Actions runs `swift test` and release compilation on every push to `main`, and on pull requests targeting `main`. Tests require no signing credentials. The macOS 15 ARM runner builds the Apple Silicon distribution.
-
-A push of a tag `vMAJOR.MINOR.PATCH` runs the release workflow. The tag must match `CFBundleShortVersionString` in `Resources/Info.plist`, and its commit must belong to `main`. Other `v*` tags fail validation rather than publishing an incorrectly versioned app.
-
-Before the first release, configure these **repository Actions secrets** in GitHub Settings → Secrets and variables → Actions:
-
-| Secret | Value |
-| --- | --- |
-| `APPLE_CERTIFICATE_BASE64` | Base64 of a password-protected `.p12` containing the Developer ID Application certificate and private key for team `4Y79TY2592` |
-| `APPLE_CERTIFICATE_PASSWORD` | Password protecting that `.p12` |
-| `APPLE_ID` | Apple account authorized for notarization for that team |
-| `APPLE_APP_PASSWORD` | App-specific password for that account |
-
-Never commit these values or paste them into issues, logs or chat. The local signing identity is not automatically exported. The workflow imports the identity into a temporary keychain and deletes it at the end; credentials are never included in release assets. Tags run repository code with these secrets, so only trusted maintainers should be allowed to push release tags.
-
-To release: update the marketing version and increment `CFBundleVersion` in `Resources/Info.plist`, commit and push to `main`, then tag that commit, for example:
+Pour publier une nouvelle version, modifiez `CFBundleShortVersionString` et incrémentez `CFBundleVersion` dans `Resources/Info.plist`. Poussez ce changement sur `main`, puis créez le tag correspondant, par exemple pour la version `2.0.1` :
 
 ```sh
 git tag v2.0.1
 git push origin v2.0.1
 ```
 
-For the existing version, use `v2.0.0` only after configuring the secrets. Each tag runs the tests again, signs the app and helper, waits for Apple's acceptance, staples the ticket and verifies Gatekeeper acceptance. Only then does it upload `Eveil-VERSION-arm64.zip` and `SHA256SUMS.txt` into a draft and publish it. Missing credentials or a validation failure prevents publication. Existing releases are not overwritten. If an upload fails after creating a draft, inspect and remove that incomplete draft before rerunning the failed job; never delete a published release to force a retry.
+Le tag doit correspondre à la version de l’app et désigner un commit présent sur `main`. Les releases existantes ne sont pas remplacées.
 
-No CI job installs or exercises the privileged helper on GitHub's runner. Real sleep/energy restoration remains a local hardware acceptance check. No GitHub runner or signing credential has to be installed on the user's Mac.
+La publication nécessite ces quatre [secrets GitHub Actions](https://github.com/emieuxcharles/Eveil-MacOS/settings/secrets/actions) :
+
+| Secret | Contenu |
+| --- | --- |
+| `APPLE_CERTIFICATE_BASE64` | Certificat Developer ID avec sa clé privée, exporté en `.p12` et encodé en Base64 |
+| `APPLE_CERTIFICATE_PASSWORD` | Mot de passe du fichier `.p12` |
+| `APPLE_ID` | Compte Apple Developer utilisé pour la notarisation |
+| `APPLE_APP_PASSWORD` | Mot de passe Apple spécifique à l’application |
+
+Ne placez jamais ces valeurs dans le dépôt. Les tests automatisés ne remplacent pas la vérification du service et de la restauration des réglages sur un Mac réel.
