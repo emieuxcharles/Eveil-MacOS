@@ -9,12 +9,14 @@ final class TestClock: SessionClock {
 }
 final class TestPower: PowerDriver {
     var settings = PowerSettings(lowPower: [.battery: 0, .ac: 1], sleepDisabled: true)
+    var failRead = false
     var failLowPower = false
     var failSleepPermission = false
+    var ignoreSleepPermission = false
     var ignoreLowPower = false
     var sleepRequests = 0
     var events: [String] = []
-    func read() throws -> PowerSettings { settings }
+    func read() throws -> PowerSettings { if failRead { throw TestError.failure }; return settings }
     func setLowPower(_ value: Int, source: PowerSource) throws {
         events.append("low:\(source.rawValue):\(value)")
         if failLowPower { throw TestError.failure }
@@ -23,7 +25,7 @@ final class TestPower: PowerDriver {
     func setSleepDisabled(_ disabled: Bool) throws {
         events.append("sleep:\(disabled)")
         if failSleepPermission { throw TestError.failure }
-        settings.sleepDisabled = disabled
+        if !ignoreSleepPermission { settings.sleepDisabled = disabled }
     }
     func requestSleep() throws { sleepRequests += 1 }
 }
@@ -49,6 +51,34 @@ final class SessionTests: XCTestCase {
         engine = SessionEngine(clock: clock, power: power, journal: journal)
     }
     func start(_ duration: Int = 3600, owner: String = "one") throws { try engine.start(duration: duration, owner: owner) }
+    func testExplicitStopWithoutJournalAllowsSleepAndPreservesCurrentLowPower() throws {
+        XCTAssertTrue(power.events.isEmpty, "Launch must remain read-only with no journal")
+        power.settings.lowPower = [.battery: 1, .ac: 0]
+        try engine.stop(cause: .user)
+        XCTAssertFalse(power.settings.sleepDisabled)
+        XCTAssertEqual(power.settings.lowPower, [.battery: 1, .ac: 0])
+        XCTAssertEqual(power.events, ["sleep:false"])
+        XCTAssertEqual(engine.snapshot.settings, power.settings)
+        XCTAssertNil(journal.value); XCTAssertNil(engine.snapshot.error)
+    }
+    func testNoJournalStopRereadsExternalIdleChangeAndRejectsFailures() throws {
+        try engine.stop(cause: .user)
+        power.settings.sleepDisabled = true
+        power.failSleepPermission = true
+        XCTAssertThrowsError(try engine.stop(cause: .user))
+        XCTAssertNil(engine.snapshot.settings, "No stale false reading may confirm a failed stop")
+        XCTAssertNotNil(engine.snapshot.error)
+        power.failSleepPermission = false; power.ignoreSleepPermission = true
+        XCTAssertThrowsError(try engine.stop(cause: .user))
+        XCTAssertNil(engine.snapshot.settings)
+        power.ignoreSleepPermission = false; power.failRead = true
+        XCTAssertThrowsError(try engine.stop(cause: .user))
+        XCTAssertNil(engine.snapshot.settings)
+        power.failRead = false
+        try engine.stop(cause: .user)
+        XCTAssertEqual(engine.snapshot.settings?.sleepDisabled, false)
+        XCTAssertNil(engine.snapshot.error)
+    }
     func testDurationsAreStrictAndUnlimitedHasNoDeadline() throws {
         for duration in [-1, 1, 30, 3599, 3601, Int.max] { XCTAssertThrowsError(try start(duration)) }
         try start(0); XCTAssertNil(engine.snapshot.deadline); XCTAssertEqual(engine.snapshot.phase, .active)

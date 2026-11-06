@@ -53,6 +53,7 @@ final class AppModel: ObservableObject {
     var onNeedAttention: (() -> Void)?
     private var client: SessionClientProtocol?
     private var clock: Timer?
+    private var installerWait: Timer?
     private var refreshCount = 0
     @Published private var refreshInFlight = false
     private var generation = UUID()
@@ -73,6 +74,12 @@ final class AppModel: ObservableObject {
     var isActive: Bool { snapshot?.phase == .active }
     var canStart: Bool { connected && setup == .ready && Self.confirmsRestoration(snapshot) && !busy }
     var canToggle: Bool { connected && !busy && (isActive || canStart) }
+    var needsRestoration: Bool { connected && !isActive && !isRestored }
+    static func menuTooltip(snapshot: ServiceSnapshot?, connected: Bool) -> String {
+        guard connected else { return "Éveil · état à vérifier" }
+        if snapshot?.phase == .active { return "Éveil · session en cours" }
+        return confirmsRestoration(snapshot) ? "Éveil · veille autorisée" : "Éveil · état à vérifier"
+    }
     var isRestored: Bool { connected && Self.confirmsRestoration(snapshot) }
     var preferredPage: PanelPage {
         if setup == .install || setup == .authorize || setup == .approve { return .setup }
@@ -84,7 +91,7 @@ final class AppModel: ObservableObject {
     var statusTitle: String {
         if let pending { return pending.label }
         if !connected { return "État à vérifier" }
-        if snapshot?.phase == .recovering { return "Restauration à vérifier" }
+        if needsRestoration { return "Restauration à vérifier" }
         return isActive ? "Votre Mac reste éveillé" : "Prêt pour votre prochaine session"
     }
     var countdown: String {
@@ -329,7 +336,18 @@ final class AppModel: ObservableObject {
             guard let self, self.current(id) else { return }; self.pending = nil
             switch result {
             case .success: self.removedService = true; self.onQuitConfirmed?()
-            case .failure(let error): self.fail("L’installation n’est pas terminée. L’ancienne version a été conservée.", error)
+            case .failure(let error):
+                self.fail("L’installation n’est pas terminée. L’ancienne version a été conservée.", error)
+                if error is UnresolvedNativeOperation || AppInstaller.isUnresolved {
+                    self.nativeOperationPending = true
+                    self.installerWait?.invalidate()
+                    self.installerWait = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
+                        guard let self else { timer.invalidate(); return }
+                        guard !AppInstaller.isUnresolved else { return }
+                        timer.invalidate(); self.installerWait = nil; self.nativeOperationPending = false
+                        self.errorMessage = "L’opération macOS est terminée. Vous pouvez relancer l’installation."
+                    }
+                }
             }
         }
     }
@@ -344,7 +362,7 @@ final class AppModel: ObservableObject {
             catch { self.fail("Le diagnostic n’a pas pu être enregistré.", error) }
         }
     }
-    deinit { clock?.invalidate() }
+    deinit { clock?.invalidate(); installerWait?.invalidate() }
 }
 
 extension AppModel {

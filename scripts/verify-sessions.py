@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
 """Developer-only, real bounded settings checks. Always restore through authenticated stop."""
-import json, os, select, signal, subprocess, sys, time
+import json, os, select, signal, subprocess, sys, time, tempfile
 from pathlib import Path
 APP = '/Applications/Eveil2.app/Contents/MacOS/Eveil2'
 LOG = Path(sys.argv[1] if len(sys.argv) > 1 else '/private/tmp/eveil2-sessions.json')
 results = []
 children = []
 def run(*args, check=True):
-    result = subprocess.run([APP, *args], capture_output=True, text=True, timeout=35)
+    if args and args[0] in ('--register', '--unregister', '--restart-service'):
+        # A harness deadline must not kill the owner of an uncancellable native operation.
+        with tempfile.TemporaryFile(mode='w+') as output, tempfile.TemporaryFile(mode='w+') as error:
+            process = subprocess.Popen([APP, *args], stdout=output, stderr=error, text=True)
+            try:
+                process.wait(timeout=35)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(f'{args}: native operation remains owned by PID {process.pid}; not killed and not retried')
+            output.seek(0); error.seek(0)
+            result = subprocess.CompletedProcess([APP, *args], process.returncode, output.read(), error.read())
+    else:
+        result = subprocess.run([APP, *args], capture_output=True, text=True, timeout=35)
     if check and result.returncode:
         raise RuntimeError(f'{args}: exit={result.returncode}; stdout={result.stdout!r}; stderr={result.stderr!r}')
     return result

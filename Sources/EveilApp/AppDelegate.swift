@@ -17,7 +17,7 @@ final class EveilAppDelegate: NSObject, NSApplicationDelegate {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = NSImage(systemSymbolName: "sun.max", accessibilityDescription: "Éveil : ouvrir les commandes")
         item.button?.target = self; item.button?.action = #selector(togglePopover)
-        item.button?.toolTip = "Éveil · veille autorisée"
+        item.button?.toolTip = "Éveil · état à vérifier"
         popover.behavior = .transient; popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         model.onNeedAttention = { [weak self] in self?.showAttention() }
         model.onReady = { [weak self] in
@@ -31,7 +31,7 @@ final class EveilAppDelegate: NSObject, NSApplicationDelegate {
         model.onQuitConfirmed = { [weak self] in self?.mayTerminate = true; NSApp.terminate(nil) }
         model.$snapshot.combineLatest(model.$connected).sink { [weak self] snapshot, connected in
             self?.item?.button?.image = NSImage(systemSymbolName: connected && snapshot?.phase == .active ? "sun.max.fill" : "sun.max", accessibilityDescription: "Éveil : ouvrir les commandes")
-            self?.item?.button?.toolTip = connected ? (snapshot?.phase == .active ? "Éveil · session en cours" : "Éveil · veille autorisée") : "Éveil · état à vérifier"
+            self?.item?.button?.toolTip = AppModel.menuTooltip(snapshot: snapshot, connected: connected)
         }.store(in: &subscriptions)
         diagnosticsObserver = DistributedNotificationCenter.default().addObserver(forName: UIDiagnostics.requestName, object: nil, queue: .main) { [weak self] notification in
             guard let self, let requestID = notification.userInfo?["requestID"] as? String else { return }

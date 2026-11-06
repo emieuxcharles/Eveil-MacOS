@@ -4,7 +4,7 @@ import EveilIPC
 import EveilCore
 
 let service = SMAppService.daemon(plistName: ServiceIdentity.plist)
-let lifecycle = makeServiceLifecycle(service)
+let lifecycle = makeServiceLifecycle(service, externallyLocked: true)
 func statusText() -> String {
     switch service.status {
     case .enabled: return "enabled"
@@ -18,21 +18,19 @@ if runSessionCLI() { exit(0) }
 let arguments = CommandLine.arguments
 if arguments.contains("--status") { print(statusText()); exit(0) }
 if arguments.contains("--register") || arguments.contains("--unregister") || arguments.contains("--restart-service") {
-    let completion: (Result<RegistrationState, Error>) -> Void = { result in
-        switch result {
-        case .success(let state):
-            let expected: RegistrationState = arguments.contains("--unregister") ? .notRegistered : .enabled
-            print(state.rawValue); exit(state == expected ? 0 : 2)
-        case .failure(let error):
-            fputs("\(ServiceLifecycleCoordinator.diagnostic(error)); status=\(statusText()); lifecycle=\(lifecycle.state.rawValue)\n", stderr)
-            if lifecycle.state == .retryAvailable { fputs("Le service n’est pas encore prêt. Réessayez explicitement l’activation dans quelques secondes.\n", stderr) }
-            exit(1)
-        }
-    }
-    if arguments.contains("--restart-service") { lifecycle.restart(completion: completion) }
-    else if arguments.contains("--unregister") { lifecycle.unregister(completion: completion) }
-    else { lifecycle.register(completion: completion) }
-    RunLoop.main.run(); exit(1)
+    let nativeLock: NativeLifecycleLock
+    do { nativeLock = try NativeLifecycleLock() }
+    catch { fputs("\(error.localizedDescription)\n\(LifecycleCLIResult.settledMarker)\n", stderr); exit(1) }
+    let bridge = LifecycleCLIResult(coordinator: lifecycle,
+        expected: arguments.contains("--unregister") ? .notRegistered : .enabled,
+        emit: { message in
+            if RegistrationState(rawValue: message) != nil { print(message); fflush(stdout) }
+            else { fputs(message + "\n", stderr); fflush(stderr) }
+        }, terminate: { exit($0) })
+    if arguments.contains("--restart-service") { lifecycle.restart(completion: bridge.complete) }
+    else if arguments.contains("--unregister") { lifecycle.unregister(completion: bridge.complete) }
+    else { lifecycle.register(completion: bridge.complete) }
+    withExtendedLifetime((nativeLock, bridge)) { RunLoop.main.run() }; exit(1)
 }
 if arguments.contains("--probe") {
     let client = ServiceClient()
@@ -62,7 +60,13 @@ if arguments.contains("--install-app") {
     AppInstaller.install { result in
         switch result {
         case .success: print("installed"); exit(0)
-        case .failure(let error): fputs("\(ServiceLifecycleCoordinator.diagnostic(error))\n", stderr); exit(1)
+        case .failure(let error):
+            fputs("\(ServiceLifecycleCoordinator.diagnostic(error))\n", stderr); fflush(stderr)
+            if error is UnresolvedNativeOperation || AppInstaller.isUnresolved {
+                _ = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
+                    if !AppInstaller.isUnresolved { exit(3) }
+                }
+            } else { exit(1) }
         }
     }
     RunLoop.main.run(); exit(1)

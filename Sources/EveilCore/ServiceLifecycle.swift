@@ -12,6 +12,7 @@ public final class ServiceLifecycleCoordinator {
     public var isOperationInFlight: Bool { pending != nil }
     private let unregisterOperation: (@escaping (Error?) -> Void) -> Void
     private let registerOperation: (@escaping (Error?) -> Void) -> Void
+    private let operationFinished: () -> Void
     private let status: () -> RegistrationState
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
     // A result deadline cannot cancel ServiceManagement. Keep exclusion until the real callback.
@@ -24,8 +25,8 @@ public final class ServiceLifecycleCoordinator {
         }
     }
     private var pending: Operation?
-    public init(unregister: @escaping (@escaping (Error?) -> Void) -> Void, register: @escaping (@escaping (Error?) -> Void) -> Void, status: @escaping () -> RegistrationState, schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void) {
-        unregisterOperation = unregister; registerOperation = register; self.status = status; self.schedule = schedule
+    public init(unregister: @escaping (@escaping (Error?) -> Void) -> Void, register: @escaping (@escaping (Error?) -> Void) -> Void, status: @escaping () -> RegistrationState, schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void, operationFinished: @escaping () -> Void = {}) {
+        unregisterOperation = unregister; registerOperation = register; self.status = status; self.schedule = schedule; self.operationFinished = operationFinished
     }
     private func begin(_ next: ServiceLifecycleState, completion: @escaping (Result<RegistrationState, Error>) -> Void) -> Operation? {
         guard pending == nil else { completion(.failure(SessionFailure("Une opération macOS est toujours en cours. Attendez sa confirmation avant de réessayer."))); return nil }
@@ -33,7 +34,7 @@ public final class ServiceLifecycleCoordinator {
     }
     private func finish(_ operation: Operation, state next: ServiceLifecycleState, result: Result<RegistrationState, Error>) {
         guard pending === operation else { return }
-        pending = nil; state = next; operation.report(result)
+        pending = nil; operationFinished(); state = next; operation.report(result)
     }
     public func unregister(completion: @escaping (Result<RegistrationState, Error>) -> Void) {
         guard let operation = begin(.unregistering, completion: completion) else { return }

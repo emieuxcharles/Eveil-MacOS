@@ -84,7 +84,7 @@ struct SessionView: View {
                 ProtectionRow(symbol: "checkmark.shield", title: "Retour à la veille", detail: model.safetyDescription)
             }
             InlineFeedback(model: model)
-            if !model.connected || model.snapshot?.phase == .recovering {
+            if !model.connected || model.needsRestoration {
                 Button(model.connected ? "Vérifier la restauration" : "Rétablir la connexion") { if model.connected { model.stop() } else { model.connect() } }
                     .buttonStyle(.borderedProminent).frame(maxWidth: .infinity).disabled(model.busy)
             }

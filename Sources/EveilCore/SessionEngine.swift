@@ -125,6 +125,15 @@ public final class SessionEngine {
     public func stop(cause: StopCause) throws {
         if record == nil {
             if journalUnreadable { allowSleepAfterUnreadableJournal(); throw SessionFailure(lastError ?? "Journal illisible.") }
+            // An explicit stop must verify current OS state, never trust the idle cache.
+            // No journal means no known low-power originals: do not change those settings.
+            verified = nil
+            do {
+                try power.setSleepDisabled(false)
+                let actual = try power.read()
+                guard !actual.sleepDisabled else { throw SessionFailure("La veille reste désactivée.") }
+                verified = actual; phase = .idle; lastError = nil; lastCause = cause
+            } catch { lastError = error.localizedDescription; throw error }
             return
         }
         if record?.stopCause == nil { record?.stopCause = cause }

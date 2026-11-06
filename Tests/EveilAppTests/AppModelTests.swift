@@ -114,6 +114,25 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(ready); XCTAssertNotEqual(model.setup, .ready)
         XCTAssertEqual(model.page, .session); XCTAssertTrue(model.connected)
     }
+    func testIdleSleepDisabledOffersRecoveryAndCanThenQuit() {
+        let client = FakeSessionClient()
+        let model = AppModel(client: client, registrationStatus: { .enabled }, isInstalled: { true })
+        model.connect(); client.probeCompletion?(.success(ServiceProof(pid: 22, euid: 0, nonce: "test")))
+        client.statusCompletion?(.success(reply(sleep: true)))
+        XCTAssertEqual(model.statusTitle, "Restauration à vérifier")
+        XCTAssertTrue(model.needsRestoration)
+        XCTAssertFalse(model.canStart)
+        var terminated = false; model.onQuitConfirmed = { terminated = true }
+        model.requestQuit(); XCTAssertEqual(client.stopCount, 1); XCTAssertFalse(terminated)
+        client.stopCompletion?(.success(reply()))
+        XCTAssertTrue(terminated)
+    }
+    func testTooltipOnlyClaimsVerifiedRestoration() {
+        XCTAssertEqual(AppModel.menuTooltip(snapshot: reply().snapshot, connected: true), "Éveil · veille autorisée")
+        XCTAssertEqual(AppModel.menuTooltip(snapshot: reply(sleep: true).snapshot, connected: true), "Éveil · état à vérifier")
+        XCTAssertEqual(AppModel.menuTooltip(snapshot: reply(.recovering, sleep: true).snapshot, connected: true), "Éveil · état à vérifier")
+        XCTAssertEqual(AppModel.menuTooltip(snapshot: reply(error: "restore failed").snapshot, connected: true), "Éveil · état à vérifier")
+    }
     func testIdleWithSleepDisabledIsNotConfirmedRestoration() {
         XCTAssertFalse(AppModel.confirmsRestoration(reply(sleep: true).snapshot))
         XCTAssertFalse(AppModel.confirmsRestoration(reply(error: "journal failure").snapshot))

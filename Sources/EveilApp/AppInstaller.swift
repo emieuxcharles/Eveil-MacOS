@@ -6,29 +6,51 @@ import EveilCore
 /// One explicit, bounded install transaction. No automatic repair, deletion or registration retry.
 /// The existing signed application owns unregister; its CLI waits for the native callback + settling.
 enum AppInstaller {
+    private static let lifecycleChild = InstallerLifecycleCommand()
+    private static var installing = false
+    private static var installationLock: NativeLifecycleLock?
+    private static var completionWait: Timer?
+    private static var installationLockPath: String { NativeLifecycleLock.defaultPath + ".installer" }
+    static var isUnresolved: Bool {
+        lifecycleChild.isBusy || NativeLifecycleLock.isHeld() || (installationLock == nil && NativeLifecycleLock.isHeld(path: installationLockPath))
+    }
+    private static func finishExclusion() {
+        if !lifecycleChild.isBusy && !NativeLifecycleLock.isHeld() { installationLock?.release(); installationLock = nil; return }
+        completionWait?.invalidate()
+        completionWait = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { timer in
+            guard !lifecycleChild.isBusy, !NativeLifecycleLock.isHeld() else { return }
+            timer.invalidate(); completionWait = nil; installationLock?.release(); installationLock = nil
+            // Completion only releases exclusion. It never resumes replacement or registration.
+        }
+    }
     private static func failure(_ text: String) -> Error { SessionFailure(text) }
     static func install(completion: @escaping (Result<Void, Error>) -> Void) {
+        guard !installing, !isUnresolved else { completion(.failure(UnresolvedNativeOperation())); return }
+        do { installationLock = try NativeLifecycleLock(path: installationLockPath) }
+        catch { completion(.failure(UnresolvedNativeOperation())); return }
+        installing = true
+        let finish: (Result<Void, Error>) -> Void = { result in installing = false; finishExclusion(); completion(result) }
         let source = Bundle.main.bundleURL
         let destination = URL(fileURLWithPath: ServiceIdentity.installedPath)
-        guard source.standardizedFileURL != destination else { completion(.failure(failure("Éveil est déjà installé dans Applications."))); return }
+        guard source.standardizedFileURL != destination else { finish(.failure(failure("Éveil est déjà installé dans Applications."))); return }
         let existing = NSRunningApplication.runningApplications(withBundleIdentifier: ServiceIdentity.app).filter { $0.processIdentifier != getpid() }
         for app in existing { _ = app.terminate() }
         // terminate() asks the old app's normal stop-before-quit path. Never force termination.
         let deadline = Date().addingTimeInterval(35)
         func awaitExit() {
             guard existing.allSatisfy(\.isTerminated) else {
-                guard Date() < deadline else { completion(.failure(failure("L’ancienne application est encore ouverte. Arrêtez sa session et quittez-la avant de réessayer."))); return }
+                guard Date() < deadline else { finish(.failure(failure("L’ancienne application est encore ouverte. Arrêtez sa session et quittez-la avant de réessayer."))); return }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: awaitExit); return
             }
             DispatchQueue.global(qos: .userInitiated).async {
                 let result = Result { try replace(source: source, destination: destination) }
                 DispatchQueue.main.async {
                     switch result {
-                    case .failure: completion(result)
+                    case .failure: finish(result)
                     case .success:
                         let configuration = NSWorkspace.OpenConfiguration(); configuration.activates = true; configuration.createsNewApplicationInstance = true
                         NSWorkspace.shared.openApplication(at: destination, configuration: configuration) { _, error in
-                            DispatchQueue.main.async { completion(error.map { .failure($0) } ?? .success(())) }
+                            DispatchQueue.main.async { finish(error.map { .failure($0) } ?? .success(())) }
                         }
                     }
                 }
@@ -77,8 +99,8 @@ enum AppInstaller {
                 guard reply.accepted, AppModel.confirmsRestoration(reply.snapshot) else { throw failure("La restauration n’est pas confirmée. L’installation s’arrête sans remplacer l’application.") }
             }
             if status != "notRegistered" && status != "notFound" {
-                let result = try command(executable, "--unregister")
-                guard String(data: result, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) == "notRegistered" else { throw failure("Le retrait de l’ancien service n’est pas confirmé.") }
+                let result = try lifecycleChild.run(executable: executable, arguments: ["--unregister"])
+                guard String(decoding: result, as: UTF8.self).split(whereSeparator: \.isNewline).contains("notRegistered") else { throw failure("Le retrait de l’ancien service n’est pas confirmé.") }
             }
             if let pid = oldPID {
                 let deadline = Date().addingTimeInterval(10)
