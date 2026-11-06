@@ -60,28 +60,29 @@ def record(name, before, active, after, **extra):
 
 initial = settings()
 try:
-    before = settings(); child, active = owner()
-    child.terminate(); output, error = child.communicate(timeout=15)
-    assert child.returncode == 0, (output, error)
-    after_state = idle('user'); record('normal-controller-quit', before, active, restored(before), final=after_state)
+    if '--helper-only' not in sys.argv:
+        before = settings(); child, active = owner()
+        child.terminate(); output, error = child.communicate(timeout=15)
+        assert child.returncode == 0, (output, error)
+        after_state = idle('user'); record('normal-controller-quit', before, active, restored(before), final=after_state)
 
-    before = settings(); child, active = owner()
-    observer = status(); assert observer['sessionID'] == active['sessionID'] and observer['ownerConnected']
-    second = run('--session-start', '3600', '--hold-seconds', '1', check=False)
-    assert second.returncode == 1 and status()['sessionID'] == active['sessionID'], second.stdout
-    child.kill(); child.communicate(timeout=5)
-    after_state = idle('disconnected'); record('killed-controller-and-second-owner-rejection', before, active, restored(before), final=after_state)
+        before = settings(); child, active = owner()
+        observer = status(); assert observer['sessionID'] == active['sessionID'] and observer['ownerConnected']
+        second = run('--session-start', '3600', '--hold-seconds', '1', check=False)
+        assert second.returncode == 1 and status()['sessionID'] == active['sessionID'], second.stdout
+        child.kill(); child.communicate(timeout=5)
+        after_state = idle('disconnected'); record('killed-controller-and-second-owner-rejection', before, active, restored(before), final=after_state)
 
-    before = settings(); child, active = owner(('--without-heartbeats',))
-    started = time.monotonic(); observations = 0
-    while True:
-        current = status(); observations += 1
-        if current['phase'] == 'idle': break
-        assert time.monotonic() - started < 27, current
-        time.sleep(2)
-    assert current.get('stopCause') == 'heartbeatLost', current
-    child.terminate(); child.communicate(timeout=15)
-    record('read-only-observers-do-not-renew-heartbeat', before, active, restored(before), final=current, elapsedSeconds=round(time.monotonic()-started, 2), readOnlyObservations=observations)
+        before = settings(); child, active = owner(('--without-heartbeats',))
+        started = time.monotonic(); observations = 0
+        while True:
+            current = status(); observations += 1
+            if current['phase'] == 'idle': break
+            assert time.monotonic() - started < 27, current
+            time.sleep(2)
+        assert current.get('stopCause') == 'heartbeatLost', current
+        child.terminate(); child.communicate(timeout=15)
+        record('read-only-observers-do-not-renew-heartbeat', before, active, restored(before), final=current, elapsedSeconds=round(time.monotonic()-started, 2), readOnlyObservations=observations)
 
     before = settings(); child, active = owner()
     old_proof = json.loads(run('--probe').stdout)

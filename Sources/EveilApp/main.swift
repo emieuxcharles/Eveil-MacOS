@@ -1,8 +1,10 @@
 import AppKit
 import ServiceManagement
 import EveilIPC
+import EveilCore
 
 let service = SMAppService.daemon(plistName: ServiceIdentity.plist)
+let lifecycle = makeServiceLifecycle(service)
 func statusText() -> String {
     switch service.status {
     case .enabled: return "enabled"
@@ -15,21 +17,19 @@ func statusText() -> String {
 if runSessionCLI() { exit(0) }
 let arguments = CommandLine.arguments
 if arguments.contains("--status") { print(statusText()); exit(0) }
-if arguments.contains("--register") {
-    do { try service.register(); print(statusText()); exit(0) }
-    catch { fputs("\(error.localizedDescription); status=\(statusText())\n", stderr); exit(1) }
-}
-if arguments.contains("--unregister") {
-    // SMAppService.h: only completion guarantees the helper is reaped and safe to re-register.
-    service.unregister { error in
-        DispatchQueue.main.async {
-            if let error { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
-            print(statusText()); exit(0)
+if arguments.contains("--register") || arguments.contains("--unregister") || arguments.contains("--restart-service") {
+    let completion: (Result<RegistrationState, Error>) -> Void = { result in
+        switch result {
+        case .success(let state): print(state.rawValue); exit(state == .enabled || state == .notRegistered ? 0 : 2)
+        case .failure(let error):
+            fputs("\(ServiceLifecycleCoordinator.diagnostic(error)); status=\(statusText()); lifecycle=\(lifecycle.state.rawValue)\n", stderr)
+            if lifecycle.state == .retryAvailable { fputs("Le service n’est pas encore prêt. Réessayez explicitement l’activation dans quelques secondes.\n", stderr) }
+            exit(1)
         }
     }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
-        fputs("Le retrait du service n’a pas été confirmé sous 30 secondes. Aucun remplacement autorisé.\n", stderr); exit(1)
-    }
+    if arguments.contains("--restart-service") { lifecycle.restart(completion: completion) }
+    else if arguments.contains("--unregister") { lifecycle.unregister(completion: completion) }
+    else { lifecycle.register(completion: completion) }
     RunLoop.main.run(); exit(1)
 }
 if arguments.contains("--probe") {
@@ -48,6 +48,7 @@ final class Bootstrap: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     let message = NSTextField(wrappingLabelWithString: "Vérifiez le service avant de poursuivre la reconstruction.")
     var client: ServiceClient?
+    let retryButton = NSButton(title: "Réessayer l’activation", target: nil, action: nil)
     func applicationDidFinishLaunching(_ notification: Notification) {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 260), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Éveil 2 — Vérification du service"
@@ -57,13 +58,26 @@ final class Bootstrap: NSObject, NSApplicationDelegate {
         for (title, action) in [("Autoriser le service", #selector(register)), ("Ouvrir les réglages macOS", #selector(settings)), ("Vérifier maintenant", #selector(probe))] {
             stack.addArrangedSubview(NSButton(title: title, target: self, action: action))
         }
+        retryButton.target = self; retryButton.action = #selector(retryRegistration); retryButton.isHidden = true
+        stack.addArrangedSubview(retryButton)
         window.contentView = stack; window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         if service.status == .enabled { probe() }
     }
     @objc func register() {
         guard Bundle.main.bundlePath == ServiceIdentity.installedPath else { message.stringValue = "Ouvrez Éveil 2 depuis le dossier Applications."; return }
-        do { try service.register(); message.stringValue = "Service enregistré. Vérifiez la connexion."; probe() }
-        catch { message.stringValue = service.status == .requiresApproval ? "Autorisez Éveil 2 dans Réglages Système → Général → Ouverture et extensions, puis vérifiez la connexion." : error.localizedDescription }
+        message.stringValue = "Activation du service…"; retryButton.isHidden = true
+        lifecycle.register(completion: showRegistration)
+    }
+    @objc func retryRegistration() { retryButton.isHidden = true; lifecycle.retryRegistration(completion: showRegistration) }
+    func showRegistration(_ result: Result<RegistrationState, Error>) {
+        switch result {
+        case .success(.enabled): message.stringValue = "Service enregistré. Vérifiez la connexion."; probe()
+        case .success(.requiresApproval): message.stringValue = "Autorisez Éveil 2 dans Réglages Système → Général → Ouverture et extensions, puis vérifiez la connexion."
+        case .success: message.stringValue = "Le service n’est pas disponible. Vérifiez son état."
+        case .failure(let error):
+            retryButton.isHidden = lifecycle.state != .retryAvailable
+            message.stringValue = lifecycle.state == .requiresApproval ? "Autorisez Éveil 2 dans les réglages macOS." : lifecycle.state == .retryAvailable ? "macOS n’a pas encore terminé la préparation du service. Réessayez l’activation." : error.localizedDescription
+        }
     }
     @objc func settings() { SMAppService.openSystemSettingsLoginItems() }
     @objc func probe() {
