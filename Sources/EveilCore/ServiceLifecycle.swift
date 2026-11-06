@@ -2,64 +2,89 @@ import Foundation
 import Darwin
 
 public enum RegistrationState: String { case enabled, requiresApproval, notRegistered, notFound, unknown }
-public enum ServiceLifecycleState: String { case idle, unregistering, settling, unregistered, registering, enabled, requiresApproval, retryAvailable, failed }
+public enum ServiceLifecycleState: String { case idle, unregistering, settling, unregistered, registering, waitingForCompletion, enabled, requiresApproval, retryAvailable, failed }
 
 /// Main-queue coordinator. Native adapters must deliver callbacks on that same queue.
 /// Apple DTS: https://developer.apple.com/forums/thread/783539 (May 2025).
 public final class ServiceLifecycleCoordinator {
-    public private(set) var state: ServiceLifecycleState = .idle
+    public private(set) var state: ServiceLifecycleState = .idle { didSet { onStateChange?(state) } }
+    public var onStateChange: ((ServiceLifecycleState) -> Void)?
+    public var isOperationInFlight: Bool { pending != nil }
     private let unregisterOperation: (@escaping (Error?) -> Void) -> Void
     private let registerOperation: (@escaping (Error?) -> Void) -> Void
     private let status: () -> RegistrationState
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
-    private var generation = 0
+    // A result deadline cannot cancel ServiceManagement. Keep exclusion until the real callback.
+    private final class Operation {
+        var callbackReceived = false
+        var completion: ((Result<RegistrationState, Error>) -> Void)?
+        init(_ completion: @escaping (Result<RegistrationState, Error>) -> Void) { self.completion = completion }
+        func report(_ result: Result<RegistrationState, Error>) {
+            let callback = completion; completion = nil; callback?(result)
+        }
+    }
+    private var pending: Operation?
     public init(unregister: @escaping (@escaping (Error?) -> Void) -> Void, register: @escaping (@escaping (Error?) -> Void) -> Void, status: @escaping () -> RegistrationState, schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void) {
         unregisterOperation = unregister; registerOperation = register; self.status = status; self.schedule = schedule
     }
-    private var busy: Bool { state == .unregistering || state == .settling || state == .registering }
+    private func begin(_ next: ServiceLifecycleState, completion: @escaping (Result<RegistrationState, Error>) -> Void) -> Operation? {
+        guard pending == nil else { completion(.failure(SessionFailure("Une opération macOS est toujours en cours. Attendez sa confirmation avant de réessayer."))); return nil }
+        let operation = Operation(completion); pending = operation; state = next; return operation
+    }
+    private func finish(_ operation: Operation, state next: ServiceLifecycleState, result: Result<RegistrationState, Error>) {
+        guard pending === operation else { return }
+        pending = nil; state = next; operation.report(result)
+    }
     public func unregister(completion: @escaping (Result<RegistrationState, Error>) -> Void) {
-        guard !busy else { completion(.failure(SessionFailure("Une opération sur le service est déjà en cours."))); return }
-        generation += 1; let operation = generation; state = .unregistering
+        guard let operation = begin(.unregistering, completion: completion) else { return }
         schedule(30) { [weak self] in
-            guard let self, self.generation == operation else { return }
-            self.generation += 1; self.state = .failed
-            completion(.failure(SessionFailure("Le retrait du service n’a pas été confirmé sous 30 secondes. Aucun remplacement autorisé.")))
+            guard let self, self.pending === operation, !operation.callbackReceived else { return }
+            self.state = .waitingForCompletion
+            operation.report(.failure(SessionFailure("Le retrait n’a pas été confirmé sous 30 secondes. macOS poursuit l’opération ; aucun remplacement ni nouvel essai autorisé avant sa fin.")))
         }
         unregisterOperation { [weak self] error in
-            guard let self, self.generation == operation else { return }
-            if let error { self.generation += 1; self.state = .failed; completion(.failure(error)); return }
+            guard let self, self.pending === operation, !operation.callbackReceived else { return }
+            operation.callbackReceived = true // Disarms the callback deadline, including during settling.
+            if let error {
+                self.finish(operation, state: self.status() == .requiresApproval ? .requiresApproval : .failed, result: .failure(error)); return
+            }
             self.state = .settling
             // Empirical two-second workaround from Apple DTS discussion, not an OS guarantee.
             self.schedule(2) { [weak self] in
-                guard let self, self.generation == operation else { return }
-                self.generation += 1; self.state = .unregistered; completion(.success(self.status()))
+                guard let self, self.pending === operation else { return }
+                let current = self.status()
+                guard current == .notRegistered else {
+                    self.finish(operation, state: .failed, result: .failure(SessionFailure("Retrait non confirmé : état \(current.rawValue)."))); return
+                }
+                // If the result already timed out, reconcile only; never auto-register on a late restart.
+                self.finish(operation, state: .unregistered, result: .success(current))
             }
         }
     }
     public func register(completion: @escaping (Result<RegistrationState, Error>) -> Void) {
-        guard !busy else { completion(.failure(SessionFailure("Une opération sur le service est déjà en cours."))); return }
-        generation += 1; let operation = generation; state = .registering
+        guard let operation = begin(.registering, completion: completion) else { return }
         schedule(10) { [weak self] in
-            guard let self, self.generation == operation else { return }
-            self.generation += 1; self.state = .failed
-            completion(.failure(SessionFailure("L’activation du service n’a pas été confirmée sous 10 secondes. Vérifiez son état avant de réessayer.")))
+            guard let self, self.pending === operation, !operation.callbackReceived else { return }
+            self.state = .waitingForCompletion
+            operation.report(.failure(SessionFailure("L’activation n’a pas été confirmée sous 10 secondes. macOS poursuit l’opération ; attendez sa fin avant de réessayer.")))
         }
         registerOperation { [weak self] error in
-            guard let self, self.generation == operation else { return }
-            self.generation += 1
+            guard let self, self.pending === operation, !operation.callbackReceived else { return }
+            operation.callbackReceived = true
             let current = self.status()
             if let error {
-                if current == .requiresApproval { self.state = .requiresApproval }
-                else if current == .notRegistered && Self.isPermissionError(error as NSError) { self.state = .retryAvailable }
-                else { self.state = .failed }
-                completion(.failure(error)); return
+                let next: ServiceLifecycleState
+                if current == .enabled { next = .enabled }
+                else if current == .requiresApproval { next = .requiresApproval }
+                else if current == .notRegistered && Self.isPermissionError(error as NSError) { next = .retryAvailable }
+                else { next = .failed }
+                self.finish(operation, state: next, result: .failure(error)); return
             }
             switch current {
-            case .enabled: self.state = .enabled
-            case .requiresApproval: self.state = .requiresApproval
-            default: self.state = .failed
+            case .enabled: self.finish(operation, state: .enabled, result: .success(current))
+            case .requiresApproval: self.finish(operation, state: .requiresApproval, result: .success(current))
+            default: self.finish(operation, state: .failed, result: .failure(SessionFailure("Activation non confirmée : état \(current.rawValue).")))
             }
-            completion(.success(current))
         }
     }
     public func restart(completion: @escaping (Result<RegistrationState, Error>) -> Void) {
@@ -71,7 +96,7 @@ public final class ServiceLifecycleCoordinator {
         }
     }
     public func retryRegistration(completion: @escaping (Result<RegistrationState, Error>) -> Void) {
-        guard state == .retryAvailable, status() == .notRegistered else { completion(.failure(SessionFailure("Vérifiez l’état du service avant de réessayer."))); return }
+        guard !isOperationInFlight, state == .retryAvailable, status() == .notRegistered else { completion(.failure(SessionFailure("Vérifiez l’état du service avant de réessayer."))); return }
         register(completion: completion) // One explicit user action, never an automatic loop.
     }
     private static func isPermissionError(_ error: NSError) -> Bool {

@@ -20,7 +20,9 @@ if arguments.contains("--status") { print(statusText()); exit(0) }
 if arguments.contains("--register") || arguments.contains("--unregister") || arguments.contains("--restart-service") {
     let completion: (Result<RegistrationState, Error>) -> Void = { result in
         switch result {
-        case .success(let state): print(state.rawValue); exit(state == .enabled || state == .notRegistered ? 0 : 2)
+        case .success(let state):
+            let expected: RegistrationState = arguments.contains("--unregister") ? .notRegistered : .enabled
+            print(state.rawValue); exit(state == expected ? 0 : 2)
         case .failure(let error):
             fputs("\(ServiceLifecycleCoordinator.diagnostic(error)); status=\(statusText()); lifecycle=\(lifecycle.state.rawValue)\n", stderr)
             if lifecycle.state == .retryAvailable { fputs("Le service n’est pas encore prêt. Réessayez explicitement l’activation dans quelques secondes.\n", stderr) }
@@ -48,8 +50,10 @@ final class Bootstrap: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     let message = NSTextField(wrappingLabelWithString: "Vérifiez le service avant de poursuivre la reconstruction.")
     var client: ServiceClient?
+    var waitingForNativeResult = false
     let retryButton = NSButton(title: "Réessayer l’activation", target: nil, action: nil)
     func applicationDidFinishLaunching(_ notification: Notification) {
+        lifecycle.onStateChange = { [weak self] in self?.lifecycleStateChanged($0) }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 260), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Éveil 2 — Vérification du service"
         let stack = NSStackView(); stack.orientation = .vertical; stack.spacing = 18; stack.edgeInsets = NSEdgeInsets(top: 25, left: 25, bottom: 25, right: 25)
@@ -77,6 +81,23 @@ final class Bootstrap: NSObject, NSApplicationDelegate {
         case .failure(let error):
             retryButton.isHidden = lifecycle.state != .retryAvailable
             message.stringValue = lifecycle.state == .requiresApproval ? "Autorisez Éveil 2 dans les réglages macOS." : lifecycle.state == .retryAvailable ? "macOS n’a pas encore terminé la préparation du service. Réessayez l’activation." : error.localizedDescription
+        }
+    }
+    func lifecycleStateChanged(_ state: ServiceLifecycleState) {
+        if state == .waitingForCompletion { waitingForNativeResult = true; retryButton.isHidden = true; return }
+        guard waitingForNativeResult else { return }
+        switch state {
+        case .enabled: waitingForNativeResult = false; probe()
+        case .requiresApproval:
+            waitingForNativeResult = false
+            message.stringValue = "Autorisez Éveil 2 dans les réglages macOS."
+        case .retryAvailable:
+            waitingForNativeResult = false; retryButton.isHidden = false
+            message.stringValue = "macOS a terminé sa tentative. Vous pouvez réessayer l’activation."
+        case .failed, .unregistered:
+            waitingForNativeResult = false
+            message.stringValue = "L’opération macOS est terminée. Vérifiez l’état du service avant de poursuivre."
+        default: break
         }
     }
     @objc func settings() { SMAppService.openSystemSettingsLoginItems() }
