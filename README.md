@@ -1,33 +1,43 @@
-# Éveil 2 — service foundation
+# Éveil 2 — authenticated service and safe sessions
 
-Task 1 builds only a signed native bootstrap and authenticated privileged XPC ping. No power settings are changed and there is no shell/command execution API.
+The signed native bootstrap remains the temporary UI. Task 2 adds daemon-owned session control, rollback, durable recovery and developer integration checks. Task 3 replaces the bootstrap UI using these interfaces.
 
-## Build and verify
+## Build and validation
 
-`./scripts/build.sh` creates `dist/Eveil2.app`. It requires the configured Developer ID certificate in the signing keychain. Both binaries use hardened runtime and secure timestamp. SwiftPM needs its normal compiler cache and build permissions.
+Run `./scripts/build.sh` to create `dist/Eveil2.app`, using the configured Developer ID certificate, hardened runtime and secure timestamp. Run `swift test` for the complete deterministic suite. Developer real-settings checks are `./scripts/verify-service.sh`, `./scripts/verify-rejection.sh`, and `python3 scripts/verify-sessions.py /private/tmp/eveil2-sessions.json`.
 
-Install in `/Applications/Eveil2.app`, open it, choose **Autoriser le service**, and approve **Éveil 2** in System Settings → General → Login Items & Extensions. Choose **Vérifier maintenant**. This is the normal GUI flow; no Terminal is required by the user.
+For a developer update, obtain the old helper PID from `--probe`, then run the installed app's `--unregister`. **This CLI waits for the SMAppService asynchronous unregister completion callback (maximum 30 seconds). Only successful completion permits replacement and registration.** The synchronous unregister API does not wait for process reaping. This is the explicit contract in the local SDK `ServiceManagement.framework/Headers/SMAppService.h` (unregisterWithCompletionHandler). Check that the old PID has disappeared as an additional diagnostic, then copy the signed replacement to `/Applications/Eveil2.app` and call `--register`. A timeout/error aborts the update; do not overwrite an executable still registered or running. Preserve the old `/Applications/Eveil.app` and previous output artifacts.
 
-Developer-only checks:
+**Current integration blocker:** on this Mac an immediate register still returned error 1 after asynchronous unregister completion and PID exit. The complete update/restart journey is therefore not yet validated; do not treat PID disappearance or the callback as empirical proof that this installation issue is solved. Current source is for review pending that investigation.
 
-- `swift test`
-- `./scripts/verify-service.sh`
-- `./scripts/verify-rejection.sh`
+The normal GUI bootstrap offers **Autoriser le service**, **Ouvrir les réglages macOS**, and **Vérifier maintenant**. Approval belongs to System Settings → General → Login Items & Extensions; no Terminal is needed in the normal user flow. Only an authenticated real response proves readiness.
 
-The installed app executable also accepts `--register`, `--unregister`, `--status` and `--probe`. These are developer diagnostics, not the user journey. Unregister before changing an installed daemon, then register the signed replacement; do not repeatedly overwrite a registered executable.
+## Identity and layout (unchanged)
 
-## Security and integration interfaces
+App ID `fr.eveil2.app`; daemon/Mach service `fr.eveil2.daemon`; plist `fr.eveil2.daemon.plist`. The daemon is `Contents/MacOS/Eveil2Daemon` in `/Applications/Eveil2.app`, with a relative `BundleProgram`. Both sides require the Apple Developer ID chain, exact team `4Y79TY2592`, and exact peer identifier. Ad-hoc clients cannot satisfy this requirement. The daemon requires root and rejects root XPC clients. KeepAlive and RunAtLoad relaunch the daemon independently of a UI client after a crash.
 
-- App ID `fr.eveil2.app`; daemon and Mach service `fr.eveil2.daemon`; launch plist `fr.eveil2.daemon.plist`.
-- Daemon location `Contents/MacOS/Eveil2Daemon`; app location `/Applications/Eveil2.app`. The launch plist only uses relative `BundleProgram`, never a conflicting absolute executable argument.
-- Both sides validate the remote code identity using an Apple Developer ID chain, exact team `4Y79TY2592`, and exact peer identifier before messages are delivered. Ad-hoc signatures cannot satisfy this requirement. Non-root clients only; daemon must run as root.
-- `EveilIPC.EveilServiceProtocol.ping(_:reply:)` returns Codable `ServiceProof` with protocolVersion/build/PID/EUID and a fresh nonce. Client only declares readiness after validating a real reply.
-- `EveilApp.ServiceClient` provides a bounded asynchronous probe with a five-second timeout. Its result is delivered on the main queue. Registration status alone never means the service works.
+## Typed IPC and Task 3 client contract
 
-Task 2 should add a separate `EveilCore` session engine and typed IPC methods. Keep lifecycle ownership and serialized daemon-side coordination separate from GUI state. Restrict accepted durations server-side and add heartbeat/disconnect handling, persistent recovery, and fixed power operations; never add arbitrary command arguments.
+`EveilServiceProtocol` exports only `ping(nonce, reply)`, `status(reply)`, `start(duration, reply)`, `heartbeat(reply)`, and `stop(reply)`. No command, executable, path, test clock, thermal injection or short duration is accepted over XPC. Supported duration values are exactly `0`, `3600`, `7200`, `10800` seconds; zero means unlimited.
 
-Task 3 should replace the temporary bootstrap with the native menu UI, preserving the authenticated client and explicit registration state machine.
+Ping retains the version-1 nonce/root `ServiceProof`. Session methods return JSON-encoded `ServiceReply`: `accepted`, a version-2 `ServiceSnapshot`, and optional request `error`. A snapshot contains phase (`idle`, `active`, `recovering`), sessionID/start/deadline/duration/remainingSeconds, ownerConnected, thermal, stopCause, verified settings and optional restoration error. Optional session fields disappear after successful restoration. Dates use Foundation Codable's reference-date seconds; lowPower is a keyed object (`battery`, `ac`, `ups`). `settings` is the last successfully read power state, not an unverified requested value.
 
-## Known scope limits
+`EveilApp.ServiceClient` is used on the main queue. Keep one client alive for the controlling UI session. `probe` verifies a real authenticated response; `status` reads without renewing ownership. `startSession(duration:heartbeats:completion:)` begins automatic 5-second heartbeats only after an accepted active reply (default heartbeats=true). `stopSession(completion:)` stops the timer and asks for restoration; `disconnect()` closes ownership and fails pending operations. `ownsSession`, `onSessionUpdate`, and `onDisconnect` support the UI state machine. Callbacks are on the main queue. Calls time out after 10 seconds and close the connection so an unknown start result cannot leave unattended ownership. A reconnect never automatically acquires or resumes the old session. On GUI quit, request stop and wait for its result; connection invalidation and daemon heartbeats are independent fallbacks.
 
-This stage has no session control, durable power recovery, launch-at-login preference, final icon, notarization submission, or uninstall flow. It is a foundation, not a distributable finished app.
+## Session policy and recovery
+
+A single serial daemon queue owns all session state. Only the connection which started the session can heartbeat; another client cannot replace it. Status/ping never refresh the heartbeat. Stop is accepted from any authenticated client. Disconnect stops immediately; 20 seconds without an owner heartbeat stops at the next 2-second tick. Duration checks use both persisted wall-clock deadlines and a continuous monotonic deadline, so clock changes cannot extend a session. Sleep/wake notifications stop without resuming.
+
+The daemon reads current per-source low-power settings before every start. It writes and fsyncs the root-only `/var/db/fr.eveil2/session.json` journal before any power mutation, enables and verifies low-power per available source, then disables and verifies sleep. All ends first force `disablesleep=0`, including when its original value was 1, and restore and verify the captured low-power value separately for each source. No historical defaults are assumed.
+
+Journal directory/file modes are 0700/0600 and root-owned, with symlink rejection, bounded reads, atomic replacement and file/directory fsync. Corrupt/unreadable journals block new sessions and permit sleep without discarding unknown originals. Partial recovery retains its journal and visible error and retries every two seconds. Successful recovery clears that error. Startup recovers the journal before accepting a new start. Deletion plus directory-sync failure is safe to retry idempotently.
+
+Serious/critical thermal state rejects start; active thermal stops restore power and request sleep through the fixed driver. A durable intent precedes the request; successful sleep is never repeated across recovery retries or wake. An interrupted intent is deliberately treated as already attempted after daemon restart: at-most-once sleep avoids a wake/sleep loop if the daemon crashed after macOS accepted the request. Thermal and sleep tests inject fake drivers only. Live tests never call sleepnow, physically close the lid, or heat the Mac.
+
+Every pmset process has a three-second execution limit, bounded output and a kill/reap deadline. The only production executable is `/usr/bin/pmset`, with fixed operations/validated values. There is no shell endpoint.
+
+## Developer CLI
+
+`--status`, `--register`, `--unregister` and `--probe` retain their foundation meanings. `--session-status` is read-only; `--session-stop` restores. `--session-start 3600` holds authenticated ownership with heartbeats until SIGTERM/SIGINT, then restores. Optional `--hold-seconds N` bounds that controller to 1–30 seconds. `--bounded-test 5` starts the production 3600-second duration and stops after five seconds, prints actual before/active/after readings, checks restoration, and cleans up on failures. `--without-heartbeats` only makes a controller expire sooner and is used to prove diagnostic clients do not renew it. No developer CLI grants a production duration bypass.
+
+Notarization/distribution, final native menu UI, launch-at-login preferences and uninstall are subsequent tasks. A raw root-helper SIGKILL still requires administrator authorization for the external test harness; the shipped XPC API intentionally has no privileged kill/test endpoint.

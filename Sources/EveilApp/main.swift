@@ -12,6 +12,7 @@ func statusText() -> String {
     @unknown default: return "unknown"
     }
 }
+if runSessionCLI() { exit(0) }
 let arguments = CommandLine.arguments
 if arguments.contains("--status") { print(statusText()); exit(0) }
 if arguments.contains("--register") {
@@ -19,8 +20,17 @@ if arguments.contains("--register") {
     catch { fputs("\(error.localizedDescription); status=\(statusText())\n", stderr); exit(1) }
 }
 if arguments.contains("--unregister") {
-    do { try service.unregister(); print(statusText()); exit(0) }
-    catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+    // SMAppService.h: only completion guarantees the helper is reaped and safe to re-register.
+    service.unregister { error in
+        DispatchQueue.main.async {
+            if let error { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+            print(statusText()); exit(0)
+        }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
+        fputs("Le retrait du service n’a pas été confirmé sous 30 secondes. Aucun remplacement autorisé.\n", stderr); exit(1)
+    }
+    RunLoop.main.run(); exit(1)
 }
 if arguments.contains("--probe") {
     let client = ServiceClient()
