@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-APP="${1:-/Applications/Eveil2.app}"
+APP="${1:-/Applications/Eveil.app}"
 STATE=$(/bin/launchctl print system/fr.eveil2.daemon)
 [[ "$STATE" == *'state = running'* ]] || { echo 'FAIL: service is not running'; exit 1; }
 REPLY=$("$APP/Contents/MacOS/Eveil2" --probe)

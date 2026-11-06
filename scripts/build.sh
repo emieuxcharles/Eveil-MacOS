@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 BUILD="${EVEIL2_BUILD_DIR:-/private/tmp/eveil2-build}"
 swift build -c release --scratch-path "$BUILD"
 BIN=$(swift build -c release --scratch-path "$BUILD" --show-bin-path)
-APP="$PWD/dist/Eveil2.app"
+APP="$PWD/dist/Eveil.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Library/LaunchDaemons" "$APP/Contents/Resources"
 cp "$BIN/Eveil2" "$BIN/Eveil2Daemon" "$APP/Contents/MacOS/"
 swift scripts/make-icon.swift "$BUILD/AppIcon.iconset"

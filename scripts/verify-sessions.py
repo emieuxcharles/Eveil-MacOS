@@ -2,7 +2,7 @@
 """Developer-only, real bounded settings checks. Always restore through authenticated stop."""
 import json, os, select, signal, subprocess, sys, time, tempfile
 from pathlib import Path
-APP = '/Applications/Eveil2.app/Contents/MacOS/Eveil2'
+APP = '/Applications/Eveil.app/Contents/MacOS/Eveil2'
 LOG = Path(sys.argv[1] if len(sys.argv) > 1 else '/private/tmp/eveil2-sessions.json')
 results = []
 children = []

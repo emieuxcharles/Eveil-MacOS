@@ -4,13 +4,13 @@
 
 ## Normal use (no Terminal)
 
-Open Éveil. If it is outside Applications, choose **Installer dans Applications**. The installer asks a running older Éveil to quit normally, confirms restoration, waits for the old signed service's asynchronous unregister completion plus two-second settling interval and verifies that its process has exited. It verifies signatures, preserves the installed version under `~/Library/Application Support/Éveil/Anciennes versions`, then replaces and opens `/Applications/Eveil2.app`. A failure stops the transaction; there is no automatic retry.
+Open Éveil. If it is outside Applications, choose **Installer dans Applications**. The installer asks a running older Éveil to quit normally, confirms restoration, waits for the old signed service's asynchronous unregister completion plus two-second settling interval and verifies that its process has exited. It verifies signatures, preserves the installed version under `~/Library/Application Support/Éveil/Anciennes versions`, then replaces and opens `/Applications/Eveil.app`. A failure stops the transaction; there is no automatic retry.
 
 Choose **Activer le service**. If macOS requires approval, open the offered System Settings page, authorize Éveil in the background, then choose **Vérifier l’autorisation**. Setup finishes only after an authenticated response and a valid session status. Choose **Commencer**, select a duration, then turn on **Maintenir éveillé**.
 
 Closing a popover or window keeps Éveil and its session running. **Quitter Éveil** waits for confirmed restoration before terminating. If restoration is uncertain, the app stays open and shows an actionable error. Forced termination is handled independently by the daemon.
 
-The gear opens **Réglages** for protection explanations, application/service versions and a local diagnostic export. **Retirer le service…** asks for confirmation, restores first, then unregisters. It does not delete the app or previous versions. After successful removal, quit Éveil and move `/Applications/Eveil2.app` to the Trash using Finder. Keep the Mac ventilated; Éveil does not guarantee safety in a closed bag.
+The gear opens **Réglages** for protection explanations, application/service versions and a local diagnostic export. **Retirer le service…** asks for confirmation, restores first, then unregisters. It does not delete the app or previous versions. After successful removal, quit Éveil and move `/Applications/Eveil.app` to the Trash using Finder. Keep the Mac ventilated; Éveil does not guarantee safety in a closed bag.
 
 ## Native UI architecture and developer rendering
 
@@ -26,9 +26,9 @@ The client rejects late heartbeat side effects after an ownership revision (star
 
 ## Build and validation
 
-Run `./scripts/build.sh` to create `dist/Eveil2.app`, using the configured Developer ID certificate, hardened runtime and secure timestamp. Run `swift test` for the complete deterministic suite. Developer real-settings checks are `./scripts/verify-service.sh`, `./scripts/verify-rejection.sh`, and `python3 scripts/verify-sessions.py /private/tmp/eveil2-sessions.json`.
+Run `./scripts/build.sh` to create `dist/Eveil.app`, using the configured Developer ID certificate, hardened runtime and secure timestamp. Run `swift test` for the complete deterministic suite. Developer real-settings checks are `./scripts/verify-service.sh`, `./scripts/verify-rejection.sh`, and `python3 scripts/verify-sessions.py /private/tmp/eveil2-sessions.json`.
 
-For a developer update, obtain the old helper PID from `--probe`, then run the installed app's `--unregister`. **This CLI waits for the SMAppService asynchronous unregister completion callback (maximum 30 seconds), then asynchronously waits two seconds before returning. Only successful completion plus that settling interval permits replacement and registration.** The synchronous unregister API does not wait for process reaping. This is the explicit contract in the local SDK `ServiceManagement.framework/Headers/SMAppService.h` (unregisterWithCompletionHandler). Check that the old PID has disappeared as an additional diagnostic, then copy the signed replacement to `/Applications/Eveil2.app` and call `--register`. A timeout/error aborts the update; do not overwrite an executable still registered or running. Preserve the old `/Applications/Eveil.app` and previous output artifacts.
+For a developer update, obtain the old helper PID from `--probe`, then run the installed app's `--unregister`. **This CLI waits for the SMAppService asynchronous unregister completion callback (maximum 30 seconds), then asynchronously waits two seconds before returning. Only successful completion plus that settling interval permits replacement and registration.** The synchronous unregister API does not wait for process reaping. This is the explicit contract in the local SDK `ServiceManagement.framework/Headers/SMAppService.h` (unregisterWithCompletionHandler). Check that the old PID has disappeared as an additional diagnostic, then copy the signed replacement to `/Applications/Eveil.app` and call `--register`. A timeout/error aborts the update; do not overwrite an executable still registered or running. Preserve the replaced bundle in a disabled backup before installation.
 
 **Apple timing workaround validated on this Mac:** [Apple DTS describes this unregister/register bug](https://developer.apple.com/forums/thread/783539) and recommends another main-run-loop turn, then an empirical delay if needed. The thread's two-second delay is used asynchronously here; it is a workaround, not an OS guarantee. Two isolated restart cycles and an active-session restart passed with the new coordinator. A permission error with status notRegistered offers an explicit retry; requiresApproval always directs the user to macOS approval. There is no automatic retry loop.
 
@@ -36,7 +36,7 @@ The normal GUI offers **Activer le service**, **Ouvrir les réglages macOS**, an
 
 ## Identity and layout (unchanged)
 
-App ID `fr.eveil2.app`; daemon/Mach service `fr.eveil2.daemon`; plist `fr.eveil2.daemon.plist`. The daemon is `Contents/MacOS/Eveil2Daemon` in `/Applications/Eveil2.app`, with a relative `BundleProgram`. Both sides require the Apple Developer ID chain, exact team `4Y79TY2592`, and exact peer identifier. Ad-hoc clients cannot satisfy this requirement. The daemon requires root and rejects root XPC clients. KeepAlive and RunAtLoad relaunch the daemon independently of a UI client after a crash.
+App ID `fr.eveil2.app`; daemon/Mach service `fr.eveil2.daemon`; plist `fr.eveil2.daemon.plist`. The daemon is `Contents/MacOS/Eveil2Daemon` in `/Applications/Eveil.app`, with a relative `BundleProgram`. Both sides require the Apple Developer ID chain, exact team `4Y79TY2592`, and exact peer identifier. Ad-hoc clients cannot satisfy this requirement. The daemon requires root and rejects root XPC clients. KeepAlive and RunAtLoad relaunch the daemon independently of a UI client after a crash.
 
 ## Typed IPC and Task 3 client contract
 
@@ -74,3 +74,31 @@ Lifecycle CLI deadlines are informational while a native operation is outstandin
 The installer retains and drains its unregister child after the CLI deadline or its own 45-second deadline. A second installation/unregister is refused while unresolved; a late completion releases exclusion only, without resuming replacement. A separate installer lock prevents a second installer from terminating the pending owner or starting another transaction. An ambiguous error from an older CLI lacking terminal markers stays conservatively blocked; it is not treated as proof that macOS finished. No owner is killed to repair a timeout. The developer integration harness likewise leaves a timed-out lifecycle owner alive instead of using `subprocess.run`'s timeout kill.
 
 `Tests/LifecycleFixture` is an isolated executable for cross-process tests, never copied into the app. Tests run real children with a simulated native callback beyond the coordinator deadline, verify refusal before and during settling, verify that no timed-out transaction resumes replacement, and require a new explicit attempt afterward. Another case covers the installer's own deadline, and another covers an ambiguous legacy error. No real ServiceManagement or power call occurs in these fixtures.
+
+## Automated tests and releases
+
+GitHub Actions runs `swift test` and release compilation on every push to `main`, and on pull requests targeting `main`. Tests require no signing credentials. The macOS 15 ARM runner builds the Apple Silicon distribution.
+
+A push of a tag `vMAJOR.MINOR.PATCH` runs the release workflow. The tag must match `CFBundleShortVersionString` in `Resources/Info.plist`, and its commit must belong to `main`. Other `v*` tags fail validation rather than publishing an incorrectly versioned app.
+
+Before the first release, configure these **repository Actions secrets** in GitHub Settings → Secrets and variables → Actions:
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_CERTIFICATE_BASE64` | Base64 of a password-protected `.p12` containing the Developer ID Application certificate and private key for team `4Y79TY2592` |
+| `APPLE_CERTIFICATE_PASSWORD` | Password protecting that `.p12` |
+| `APPLE_ID` | Apple account authorized for notarization for that team |
+| `APPLE_APP_PASSWORD` | App-specific password for that account |
+
+Never commit these values or paste them into issues, logs or chat. The local signing identity is not automatically exported. The workflow imports the identity into a temporary keychain and deletes it at the end; credentials are never included in release assets. Tags run repository code with these secrets, so only trusted maintainers should be allowed to push release tags.
+
+To release: update the marketing version and increment `CFBundleVersion` in `Resources/Info.plist`, commit and push to `main`, then tag that commit, for example:
+
+```sh
+git tag v2.0.1
+git push origin v2.0.1
+```
+
+For the existing version, use `v2.0.0` only after configuring the secrets. Each tag runs the tests again, signs the app and helper, waits for Apple's acceptance, staples the ticket and verifies Gatekeeper acceptance. Only then does it upload `Eveil-VERSION-arm64.zip` and `SHA256SUMS.txt` into a draft and publish it. Missing credentials or a validation failure prevents publication. Existing releases are not overwritten. If an upload fails after creating a draft, inspect and remove that incomplete draft before rerunning the failed job; never delete a published release to force a retry.
+
+No CI job installs or exercises the privileged helper on GitHub's runner. Real sleep/energy restoration remains a local hardware acceptance check. No GitHub runner or signing credential has to be installed on the user's Mac.

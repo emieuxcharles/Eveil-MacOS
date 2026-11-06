@@ -1,0 +1,96 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set temporary paths
+        run: |
+          echo "EVEIL2_BUILD_DIR=$RUNNER_TEMP/eveil-build" >> "$GITHUB_ENV"
+          echo "SIGNING_KEYCHAIN=$RUNNER_TEMP/eveil-signing.keychain-db" >> "$GITHUB_ENV"
+      - name: Validate version and main ancestry
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected vMAJOR.MINOR.PATCH'; exit 1; }
+          [[ "$RELEASE_TAG" == "v$VERSION" ]] || { echo 'Tag differs from Info.plist version'; exit 1; }
+          git merge-base --is-ancestor HEAD origin/main
+          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
+      - name: Test
+        run: swift test
+      - name: Import signing identity
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in CERTIFICATE_BASE64 CERTIFICATE_PASSWORD APPLE_ID APPLE_APP_PASSWORD; do
+            [[ -n "${!name}" ]] || { echo "Missing secret: $name"; exit 1; }
+          done
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 32)
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+          umask 077
+          printf '%s' "$CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$SIGNING_KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$SIGNING_KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN"
+          security list-keychains -d user -s "$SIGNING_KEYCHAIN"
+          IDENTITY=$(security find-identity -v -p codesigning "$SIGNING_KEYCHAIN" | awk '/Developer ID Application:.*\(4Y79TY2592\)/ {print $2}')
+          [[ "$IDENTITY" =~ ^[A-F0-9]{40}$ ]] || { echo 'Expected one Developer ID Application identity for team 4Y79TY2592'; exit 1; }
+          echo "EVEIL2_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          rm -f "$RUNNER_TEMP/certificate.p12"
+      - name: Build and sign
+        run: bash scripts/build.sh
+      - name: Notarize and verify
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          ditto -c -k --keepParent dist/Eveil.app "$RUNNER_TEMP/notary.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notary.zip" --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id 4Y79TY2592 --wait --timeout 20m --output-format json > "$RUNNER_TEMP/notary.json"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print("Apple status:",r["status"]); sys.exit(0 if r["status"]=="Accepted" else 1)' "$RUNNER_TEMP/notary.json"
+          xcrun stapler staple dist/Eveil.app
+          xcrun stapler validate dist/Eveil.app
+          codesign --verify --deep --strict dist/Eveil.app
+          spctl --assess --type execute --verbose=2 dist/Eveil.app
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          ditto -c -k --keepParent dist/Eveil.app "release/Eveil-$RELEASE_VERSION-arm64.zip"
+          cd release
+          shasum -a 256 ./*.zip > SHA256SUMS.txt
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" release/* --verify-tag --title "Eveil $RELEASE_VERSION" --generate-notes --draft
+          gh release edit "$RELEASE_TAG" --draft=false
+      - name: Remove temporary credentials
+        if: always()
+        run: |
+          security delete-keychain "$SIGNING_KEYCHAIN" || true
+          rm -f "$RUNNER_TEMP/certificate.p12"

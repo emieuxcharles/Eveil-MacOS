@@ -233,7 +233,7 @@ struct SettingsView: View {
                 if model.pending == .uninstall || model.nativeOperationPending { HStack { ProgressView().controlSize(.small); Text("macOS termine le retrait…").font(.system(size: 11)) } }
             }
             HStack {
-                Button("Afficher dans le Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: "/Applications/Eveil2.app")]) }.buttonStyle(.borderless).font(.system(size: 11))
+                Button("Afficher dans le Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: "/Applications/Eveil.app")]) }.buttonStyle(.borderless).font(.system(size: 11))
                 Spacer()
                 Button("Quitter Éveil") { model.requestQuit() }.buttonStyle(.borderless).font(.system(size: 11)).disabled(model.busy)
             }

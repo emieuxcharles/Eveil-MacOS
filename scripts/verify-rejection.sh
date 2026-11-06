@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-APP="${1:-/Applications/Eveil2.app}"
+APP="${1:-/Applications/Eveil.app}"
 TEST_DIR=$(mktemp -d /private/tmp/eveil2-untrusted.XXXXXX)
 trap 'rm -rf "$TEST_DIR"' EXIT
 cp "$APP/Contents/MacOS/Eveil2" "$TEST_DIR/Eveil2Untrusted"
