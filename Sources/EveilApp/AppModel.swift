@@ -60,6 +60,8 @@ final class AppModel: ObservableObject {
     private var receivedUptime = ProcessInfo.processInfo.systemUptime
     private var pendingLateNativeResult = false
     private var removedService = false
+    private let registrationStatus: () -> RegistrationState
+    private let isInstalled: () -> Bool
     private let service = SMAppService.daemon(plistName: ServiceIdentity.plist)
     private lazy var lifecycle: ServiceLifecycleCoordinator = {
         let value = makeServiceLifecycle(service)
@@ -72,6 +74,10 @@ final class AppModel: ObservableObject {
     var canStart: Bool { connected && setup == .ready && Self.confirmsRestoration(snapshot) && !busy }
     var canToggle: Bool { connected && !busy && (isActive || canStart) }
     var isRestored: Bool { connected && Self.confirmsRestoration(snapshot) }
+    var preferredPage: PanelPage {
+        if setup == .install || setup == .authorize || setup == .approve { return .setup }
+        return snapshot != nil || setup == .ready ? .session : .setup
+    }
     static func confirmsRestoration(_ snapshot: ServiceSnapshot?) -> Bool {
         snapshot?.protocolVersion == 2 && snapshot?.phase == .idle && snapshot?.settings?.sleepDisabled == false && snapshot?.error == nil
     }
@@ -112,7 +118,19 @@ final class AppModel: ObservableObject {
         if snapshot?.phase == .recovering { return "Restauration en cours de vérification" }
         return isActive ? "Arrêt automatique si vous quittez l’app" : isRestored ? "Veille autorisée · réglages restaurés" : "Restauration à vérifier"
     }
-    init(fixture: UIFixture? = nil, client: SessionClientProtocol? = nil) {
+    private static func currentRegistrationStatus() -> RegistrationState {
+        switch SMAppService.daemon(plistName: ServiceIdentity.plist).status {
+        case .enabled: return .enabled
+        case .requiresApproval: return .requiresApproval
+        case .notRegistered: return .notRegistered
+        case .notFound: return .notFound
+        @unknown default: return .unknown
+        }
+    }
+    init(fixture: UIFixture? = nil, client: SessionClientProtocol? = nil,
+         registrationStatus: @escaping () -> RegistrationState = { AppModel.currentRegistrationStatus() },
+         isInstalled: @escaping () -> Bool = { Bundle.main.bundleURL.standardizedFileURL.path == ServiceIdentity.installedPath }) {
+        self.registrationStatus = registrationStatus; self.isInstalled = isInstalled
         isFixture = fixture != nil; self.client = client
         if let fixture { applyFixture(fixture); return }
         if let client { bind(client) }
@@ -124,7 +142,7 @@ final class AppModel: ObservableObject {
     private func bind(_ client: SessionClientProtocol) {
         client.onDisconnect = { [weak self] error in
             guard let self else { return }
-            self.generation = UUID(); self.pending = nil; self.refreshInFlight = false; self.connected = false; self.setup = .connect
+            self.generation = UUID(); self.pending = nil; self.refreshInFlight = false; self.reconcileDisconnectedState()
             self.fail("La connexion a été interrompue. Vérifiez l’état avant de continuer.", error)
         }
         client.onSessionUpdate = { [weak self] reply in
@@ -145,13 +163,19 @@ final class AppModel: ObservableObject {
     }
     func refreshSetup() {
         guard !isFixture else { return }
-        if Bundle.main.bundleURL.standardizedFileURL.path != ServiceIdentity.installedPath { setup = .install; return }
-        switch service.status {
+        if !isInstalled() { setup = .install; return }
+        switch registrationStatus() {
         case .requiresApproval: setup = .approve
         case .notRegistered, .notFound: setup = .authorize
-        case .enabled: setup = connected ? .ready : .connect
-        @unknown default: setup = .connect
+        case .enabled: setup = connected && (isActive || isRestored) && snapshot?.error == nil && errorMessage == nil ? .ready : .connect
+        case .unknown: setup = .connect
         }
+    }
+    private func reconcileDisconnectedState() {
+        connected = false; refreshSetup(); page = preferredPage
+    }
+    private func requestAttention() {
+        page = preferredPage; onNeedAttention?()
     }
     private func begin(_ action: PendingAction) -> UUID? {
         guard !isFixture, !busy else { return nil }
@@ -172,15 +196,19 @@ final class AppModel: ObservableObject {
             fail("Le service n’a pas confirmé l’opération. Vérifiez la restauration.", SessionFailure(detail))
         }
         if reply.accepted && reply.error == nil && reply.snapshot.error == nil { errorMessage = nil; technicalDetail = "" }
+        refreshSetup()
         return reply.accepted
     }
     func connect() {
+        guard !isFixture, !busy else { return }
+        refreshSetup()
+        guard setup == .connect || setup == .ready else { requestAttention(); return }
         guard let id = begin(.connect) else { return }
         let client = getClient()
         client.probe { [weak self] result in
             guard let self, self.current(id) else { return }
             switch result {
-            case .failure(let error): self.pending = nil; self.connected = false; self.setup = .connect; self.fail("Le service ne répond pas. Réessayez la connexion.", error); self.onNeedAttention?()
+            case .failure(let error): self.pending = nil; self.reconcileDisconnectedState(); self.fail("Le service ne répond pas. Vérifiez l’action proposée ci-dessous.", error); self.requestAttention()
             case .success(let proof):
                 self.serviceVersion = proof.build
                 client.status { [weak self] result in
@@ -189,9 +217,10 @@ final class AppModel: ObservableObject {
                     switch result {
                     case .success(let reply):
                         self.connected = true
-                        if self.accept(reply), self.connected { self.setup = .ready; self.removedService = false; self.onReady?() }
-                        else { self.connected = false; self.setup = .connect }
-                    case .failure(let error): self.connected = false; self.setup = .connect; self.fail("L’état du Mac n’a pas pu être vérifié.", error); self.onNeedAttention?()
+                        let accepted = self.accept(reply)
+                        if accepted, self.connected, self.setup == .ready { self.removedService = false; self.onReady?() }
+                        else { self.requestAttention() }
+                    case .failure(let error): self.reconcileDisconnectedState(); self.fail("L’état du Mac n’a pas pu être vérifié.", error); self.requestAttention()
                     }
                 }
             }
@@ -206,7 +235,7 @@ final class AppModel: ObservableObject {
             self.refreshInFlight = false
             switch result {
             case .success(let reply): self.accept(reply)
-            case .failure(let error): self.connected = false; self.setup = .connect; self.fail("Impossible de vérifier l’état. Reconnectez le service.", error)
+            case .failure(let error): self.reconcileDisconnectedState(); self.fail("Impossible de vérifier l’état. Vérifiez la connexion du service.", error)
             }
         }
     }
@@ -220,7 +249,7 @@ final class AppModel: ObservableObject {
             guard let self, self.current(id) else { return }; self.pending = nil
             switch result {
             case .success(let reply): self.accept(reply)
-            case .failure(let error): self.connected = false; self.setup = .connect; self.fail("L’activation n’est pas confirmée. Vérifiez l’état du service.", error)
+            case .failure(let error): self.reconcileDisconnectedState(); self.fail("L’activation n’est pas confirmée. Vérifiez l’état du service.", error)
             }
         }
     }
@@ -236,19 +265,19 @@ final class AppModel: ObservableObject {
                 let accepted = self.accept(reply)
                 let restored = accepted && self.isRestored
                 if restored { self.setup = .ready; self.notice = "Veille autorisée. Réglages d’énergie restaurés." }
-                else { self.fail("La restauration n’est pas confirmée. Éveil reste ouvert pour vous permettre de vérifier.", SessionFailure(reply.error ?? reply.snapshot.error ?? "État reçu : \(reply.snapshot.phase.rawValue)")) }
+                else { self.setup = .connect; self.page = .session; self.fail("La restauration n’est pas confirmée. Éveil reste ouvert pour vous permettre de vérifier.", SessionFailure(reply.error ?? reply.snapshot.error ?? "État reçu : \(reply.snapshot.phase.rawValue)")) }
                 completion(restored)
-            case .failure(let error): self.connected = false; self.setup = .connect; self.fail("La restauration n’est pas confirmée. Reconnectez le service avant de quitter.", error); completion(false)
+            case .failure(let error): self.reconcileDisconnectedState(); self.fail("La restauration n’est pas confirmée. Vérifiez le service avant de quitter.", error); completion(false)
             }
         }
     }
     func requestQuit() {
         guard !busy, !isFixture else { return }
         // No service was ever reachable, or removal was explicitly confirmed: nothing was started here.
-        if removedService || (snapshot == nil && setup == .install) || (snapshot == nil && service.status != .enabled && setup != .connect) { onQuitConfirmed?(); return }
+        if removedService || (snapshot == nil && setup == .install) || (snapshot == nil && registrationStatus() != .enabled && setup != .connect) { onQuitConfirmed?(); return }
         restore(for: .quit) { [weak self] confirmed in
             if confirmed { self?.client?.disconnect(); self?.onQuitConfirmed?() }
-            else { self?.onNeedAttention?() }
+            else { self?.requestAttention() }
         }
     }
     func register() {
@@ -331,6 +360,10 @@ extension AppModel {
         case .connecting: connected = false; setup = .connect; pending = .connect
         case .approval: connected = false; setup = .approve; page = .setup
         case .error: connected = false; setup = .connect; errorMessage = "La connexion a été interrompue. Vérifiez l’état avant de continuer."; technicalDetail = "Eveil2 : délai de réponse dépassé (10 secondes). Aucune restauration confirmée."
+        case .recovery:
+            setup = .connect; snapshot?.phase = .recovering; snapshot?.error = "Restauration à confirmer"
+            errorMessage = "La restauration n’est pas confirmée. Éveil reste ouvert pour vous permettre de vérifier."
+            technicalDetail = "La remise en veille a été demandée ; le service vérifie encore la restauration des réglages."
         case .setup: connected = false; setup = .install; page = .setup
         case .settings: page = .settings
         case .ready: page = .setup

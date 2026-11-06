@@ -47,6 +47,16 @@ if arguments.contains("--probe") {
 }
 
 let app = NSApplication.shared
+if arguments.contains("--ui-state") {
+    app.setActivationPolicy(.prohibited)
+    UIDiagnostics.request { result in
+        switch result {
+        case .success(let data): print(String(decoding: data, as: UTF8.self)); exit(0)
+        case .failure(let error): fputs("\(error.localizedDescription)\n", stderr); exit(1)
+        }
+    }
+    RunLoop.main.run(); exit(1)
+}
 if arguments.contains("--install-app") {
     app.setActivationPolicy(.accessory)
     AppInstaller.install { result in

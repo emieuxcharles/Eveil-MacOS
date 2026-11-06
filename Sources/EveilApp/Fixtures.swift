@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-enum UIFixture: String, CaseIterable { case idle, active, unlimited, connecting, approval, error, setup, settings, ready }
+enum UIFixture: String, CaseIterable { case idle, active, unlimited, connecting, approval, error, recovery, setup, settings, ready }
 
 /// Developer-only renderer: no ServiceClient, launch hook, lifecycle calls or live timers.
 enum ViewSnapshots {

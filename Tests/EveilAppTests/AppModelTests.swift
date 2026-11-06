@@ -1,5 +1,6 @@
 import XCTest
 import EveilIPC
+import EveilCore
 @testable import EveilApp
 
 final class FakeSessionClient: SessionClientProtocol {
@@ -24,14 +25,14 @@ final class AppModelTests: XCTestCase {
         ServiceReply(accepted: accepted, snapshot: ServiceSnapshot(phase: phase, sessionID: nil, startedAt: nil, deadline: nil, duration: phase == .active ? 3600 : nil, remainingSeconds: phase == .active ? 3599 : nil, ownerConnected: phase == .active, thermal: .nominal, stopCause: nil, settings: PowerSettings(lowPower: [.battery: 1, .ac: 0], sleepDisabled: sleep), error: error), error: error)
     }
     private func connected() -> (AppModel, FakeSessionClient) {
-        let client = FakeSessionClient(); let model = AppModel(client: client)
+        let client = FakeSessionClient(); let model = AppModel(client: client, registrationStatus: { .enabled }, isInstalled: { true })
         model.connect(); client.probeCompletion?(.success(ServiceProof(pid: 22, euid: 0, nonce: "test")))
         client.statusCompletion?(.success(reply()))
         XCTAssertTrue(model.canStart)
         return (model, client)
     }
     func testReadyRequiresStatusAfterProbe() {
-        let client = FakeSessionClient(); let model = AppModel(client: client)
+        let client = FakeSessionClient(); let model = AppModel(client: client, registrationStatus: { .enabled }, isInstalled: { true })
         model.connect(); XCTAssertFalse(model.canStart)
         client.probeCompletion?(.success(ServiceProof(pid: 22, euid: 0, nonce: "test")))
         XCTAssertFalse(model.canStart); XCTAssertFalse(model.connected)
@@ -63,6 +64,56 @@ final class AppModelTests: XCTestCase {
         model.requestQuit(); client.stopCompletion?(.success(reply()))
         XCTAssertTrue(terminated); XCTAssertTrue(client.disconnected)
     }
+    func testDisconnectReconcilesRevokedApprovalAndPreservesUnknownSnapshot() {
+        var registration: RegistrationState = .enabled
+        let client = FakeSessionClient()
+        let model = AppModel(client: client, registrationStatus: { registration }, isInstalled: { true })
+        model.connect(); client.probeCompletion?(.success(ServiceProof(pid: 22, euid: 0, nonce: "test")))
+        client.statusCompletion?(.success(reply(.active, sleep: true)))
+        registration = .requiresApproval
+        client.onDisconnect?(NSError(domain: "revoked", code: 1))
+        XCTAssertEqual(model.setup, .approve)
+        XCTAssertEqual(model.snapshot?.phase, .active, "Preserve the last known state, without claiming restoration")
+        XCTAssertFalse(model.connected); XCTAssertFalse(model.isRestored)
+        model.connect()
+        XCTAssertEqual(client.probeCount, 1, "An explicit retry must route to approval, not retry unreachable XPC")
+        XCTAssertEqual(model.page, .setup)
+    }
+    func testFailedProbeReconcilesUnregisteredService() {
+        var registration: RegistrationState = .enabled
+        let client = FakeSessionClient()
+        let model = AppModel(client: client, registrationStatus: { registration }, isInstalled: { true })
+        model.connect(); registration = .notRegistered
+        client.probeCompletion?(.failure(NSError(domain: "removed", code: 1)))
+        XCTAssertEqual(model.setup, .authorize)
+        model.connect(); XCTAssertEqual(client.probeCount, 1)
+        XCTAssertEqual(model.page, .setup)
+    }
+    func testFailedQuitRoutesToRecoveryInsteadOfReadySetup() {
+        let (model, client) = connected()
+        model.page = .settings
+        var presentedPage: PanelPage?
+        model.onNeedAttention = { presentedPage = model.page }
+        model.requestQuit()
+        client.stopCompletion?(.success(reply(.recovering, accepted: false, error: "restoration failed")))
+        XCTAssertEqual(presentedPage, .session)
+        XCTAssertEqual(model.page, .session)
+        XCTAssertNotEqual(model.setup, .ready)
+        XCTAssertFalse(model.canStart); XCTAssertFalse(model.isRestored)
+        XCTAssertEqual(model.statusTitle, "Restauration à vérifier")
+        model.stop(); XCTAssertEqual(client.stopCount, 2, "Recovery retains an explicit stop/verification action")
+        client.stopCompletion?(.success(reply()))
+        XCTAssertTrue(model.isRestored); XCTAssertTrue(model.canStart)
+    }
+    func testConnectionToRecoveringServiceDoesNotOfferSuccessfulSetup() {
+        let client = FakeSessionClient()
+        let model = AppModel(client: client, registrationStatus: { .enabled }, isInstalled: { true })
+        var ready = false; model.onReady = { ready = true }
+        model.connect(); client.probeCompletion?(.success(ServiceProof(pid: 22, euid: 0, nonce: "test")))
+        client.statusCompletion?(.success(reply(.recovering, error: "pending restore")))
+        XCTAssertFalse(ready); XCTAssertNotEqual(model.setup, .ready)
+        XCTAssertEqual(model.page, .session); XCTAssertTrue(model.connected)
+    }
     func testIdleWithSleepDisabledIsNotConfirmedRestoration() {
         XCTAssertFalse(AppModel.confirmsRestoration(reply(sleep: true).snapshot))
         XCTAssertFalse(AppModel.confirmsRestoration(reply(error: "journal failure").snapshot))
@@ -84,7 +135,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertThrowsError(try AppInstaller.decodeStopReply(Data("notRegistered".utf8)))
     }
     func testIncompatibleStatusCannotBecomeReady() {
-        let client = FakeSessionClient(); let model = AppModel(client: client)
+        let client = FakeSessionClient(); let model = AppModel(client: client, registrationStatus: { .enabled }, isInstalled: { true })
         model.connect(); client.probeCompletion?(.success(ServiceProof(pid: 22, euid: 0, nonce: "test")))
         var snapshot = reply().snapshot; snapshot.protocolVersion = 999
         client.statusCompletion?(.success(ServiceReply(accepted: true, snapshot: snapshot)))
