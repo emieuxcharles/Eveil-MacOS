@@ -26,7 +26,7 @@ public struct ServiceProof: Codable, Equatable {
     public let euid: UInt32
     public let nonce: String
     public init(pid: Int32, euid: UInt32, nonce: String) {
-        self.protocolVersion = 1; self.build = "2.0.0-proof.1"
+        self.protocolVersion = 1; self.build = "2.0.0"
         self.pid = pid; self.euid = euid; self.nonce = nonce
     }
     public func validates(nonce: String) -> Bool {

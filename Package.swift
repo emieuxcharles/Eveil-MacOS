@@ -12,6 +12,7 @@ let package = Package(name: "Eveil2", platforms: [.macOS(.v14)], products: [
         .unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist", "-Xlinker", root + "/Resources/Daemon-Info.plist"])
     ]),
     .executableTarget(name: "EveilApp", dependencies: ["EveilIPC", "EveilCore"]),
+    .testTarget(name: "EveilAppTests", dependencies: ["EveilApp", "EveilIPC"]),
     .testTarget(name: "EveilIPCTests", dependencies: ["EveilIPC"]),
     .testTarget(name: "EveilCoreTests", dependencies: ["EveilCore", "EveilIPC"])
 ])

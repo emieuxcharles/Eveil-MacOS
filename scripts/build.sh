@@ -7,6 +7,8 @@ BIN=$(swift build -c release --scratch-path "$BUILD" --show-bin-path)
 APP="$PWD/dist/Eveil2.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Library/LaunchDaemons" "$APP/Contents/Resources"
 cp "$BIN/Eveil2" "$BIN/Eveil2Daemon" "$APP/Contents/MacOS/"
+swift scripts/make-icon.swift "$BUILD/AppIcon.iconset"
+iconutil -c icns "$BUILD/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/fr.eveil2.daemon.plist "$APP/Contents/Library/LaunchDaemons/"
 printf 'APPL????' > "$APP/Contents/PkgInfo"

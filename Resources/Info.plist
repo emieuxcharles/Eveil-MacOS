@@ -3,21 +3,25 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>Éveil 2</string>
+	<string>Éveil</string>
 	<key>CFBundleExecutable</key>
 	<string>Eveil2</string>
 	<key>CFBundleIdentifier</key>
 	<string>fr.eveil2.app</string>
 	<key>CFBundleName</key>
-	<string>Éveil 2</string>
+	<string>Éveil</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>2.0.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>200</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 </dict>
